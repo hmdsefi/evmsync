@@ -16,7 +16,7 @@ cover.out
 coverage.*
 *.coverprofile
 
-# Local Go workspace (used to develop faultline and lockstep together)
+# Local Go workspace
 go.work
 go.work.sum
 
