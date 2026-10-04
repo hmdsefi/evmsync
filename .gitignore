@@ -1,1 +1,49 @@
+# Private planning docs
 .helper/
+
+# Go build and test artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+cover.out
+coverage.*
+*.coverprofile
+
+# Local Go workspace (used to develop faultline and lockstep together)
+go.work
+go.work.sum
+
+# IDEs and editors
+.idea/
+*.iml
+.vscode/
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+
+# AI coding tools (local settings)
+.cursor/
+.claude/settings.local.json
+.claude/worktrees/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temp files
+*.log
+tmp/
