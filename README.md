@@ -1,7 +1,13 @@
-# evmsync
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/readme-dark.png">
+    <img alt="evmsync: reorg-safe EVM indexing for Go. A log of five entries chained together: Block 100, Block 101, Revert to 100, Block 101' and Finalize 100. The link to the orphaned block 101 is cut, and the Go gopher stands on the finalized block." src=".github/assets/readme-light.png" width="640">
+  </picture>
+</p>
 
-**Reorg-safe EVM indexing framework for Go.**
-Typed event handlers in, consistent onchain state out.
+<p align="center">
+  Typed event handlers in, consistent onchain state out.
+</p>
 
 evmsync streams blocks and logs from EVM chains, decodes them into typed Go events,
 runs your handlers, and keeps your database consistent — rolling back automatically
@@ -51,3 +57,9 @@ only handle forward.
 [gograph](https://github.com/hmdsefi/gograph) orders handlers by their table
 dependencies, rejects cycles at startup, finds downstream tables to rebuild after
 a rollback, and tracks contracts deployed by factories.
+
+## Credits
+
+The gopher in the banner is drawn after the Go gopher, designed by
+[Renee French](https://reneefrench.blogspot.com/) and licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
