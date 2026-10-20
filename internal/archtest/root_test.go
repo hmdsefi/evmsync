@@ -5,6 +5,7 @@ package archtest
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -65,6 +66,9 @@ func report(t *testing.T, topic string, fs []finding) {
 func moduleRoot(dir string) (string, error) {
 	for d := dir; ; {
 		data, err := os.ReadFile(filepath.Join(d, "go.mod"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("archtest: %w", err)
+		}
 		if err == nil && declaresModule(string(data)) {
 			return d, nil
 		}

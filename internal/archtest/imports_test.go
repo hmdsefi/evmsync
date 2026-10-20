@@ -206,8 +206,36 @@ func TestImportParseError(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("package chain\n\nimport (\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := checkImports(root, inventory, rules)
+	_, err := checkImports(root, nil, rules)
 	if want := "archtest: parse " + bad + ": "; err == nil || !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("error = %v, want prefix %q", err, want)
+	}
+}
+
+// TestAllowed covers the standard-library branches the fixtures do not reach.
+func TestAllowed(t *testing.T) {
+	tests := []struct {
+		p, pkg string
+		want   bool
+	}{
+		{"net", "chain", false},
+		{"net", "rpc", true},
+		{"math/rand", "consumer", false},
+		{"math/rand/v2", "chainlog", false},
+		{"os/exec", "tracker", false},
+		{"time", "tracker", false},
+		{"time", "chain", true},
+		{"testing", "chainlog/logtest", true},
+		{"testing/quick", "chainlog/logtest", false},
+		{"testing/quick", "chain", false},
+		{"C", "internal/archtest", false},
+		{"github.com/hmdsefi/evmsync", "memstore", true},
+		{"github.com/hmdsefi/evmsync/pgstore", "", false},
+		{"golang.org/x/crypto/sha3", "chainlog", false},
+	}
+	for _, tt := range tests {
+		if got := allowed(tt.p, rules[tt.pkg]); got != tt.want {
+			t.Errorf("allowed(%q) in package %q = %v, want %v", tt.p, tt.pkg, got, tt.want)
+		}
 	}
 }

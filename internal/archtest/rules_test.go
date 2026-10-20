@@ -13,28 +13,28 @@ type rule struct {
 }
 
 const (
-	geth      = "github.com/ethereum/go-ethereum/common"
-	hexutil   = "github.com/ethereum/go-ethereum/common/hexutil"
-	abi       = "github.com/ethereum/go-ethereum/accounts/abi"
-	keccak    = "golang.org/x/crypto/sha3"
-	fakechain = "internal/fakechain"
+	gethCommon = "github.com/ethereum/go-ethereum/common"
+	hexutil    = "github.com/ethereum/go-ethereum/common/hexutil"
+	abi        = "github.com/ethereum/go-ethereum/accounts/abi"
+	keccak     = "golang.org/x/crypto/sha3"
+	fakechain  = "internal/fakechain"
 )
 
 // rules is the import table of architecture §5.1, keyed by relative package path.
 var rules = map[string]rule{
-	"chain":              {external: []string{geth, keccak}, noNet: true},
-	"chainlog":           {module: []string{"chain"}, external: []string{geth}, noNet: true},
+	"chain":              {external: []string{gethCommon, keccak}, noNet: true},
+	"chainlog":           {module: []string{"chain"}, external: []string{gethCommon}, noNet: true},
 	"chainlog/wal":       {module: []string{"chain", "chainlog"}},
 	"chainlog/logtest":   {module: []string{"chain", "chainlog"}, testing: true},
-	"tracker":            {module: []string{"chain", "chainlog"}, external: []string{geth}, noNet: true, noTime: true},
+	"tracker":            {module: []string{"chain", "chainlog"}, external: []string{gethCommon}, noNet: true, noTime: true},
 	"consumer":           {module: []string{"chain", "chainlog"}, noNet: true},
-	"rpc":                {module: []string{"chain"}, external: []string{geth, hexutil}},
-	"ingest":             {module: []string{"chain", "chainlog", "tracker"}, external: []string{geth}},
-	"":                   {module: []string{"chain", "chainlog", "chainlog/wal", "consumer", "ingest", "rpc", "tracker"}, external: []string{geth}},
+	"rpc":                {module: []string{"chain"}, external: []string{gethCommon, hexutil}},
+	"ingest":             {module: []string{"chain", "chainlog", "tracker"}, external: []string{gethCommon}},
+	"":                   {module: []string{"chain", "chainlog", "chainlog/wal", "consumer", "ingest", "rpc", "tracker"}, external: []string{gethCommon}},
 	"memstore":           {module: []string{"", "chain", "chainlog"}, noNet: true},
-	"internal/gen":       {external: []string{abi, geth}},
+	"internal/gen":       {external: []string{abi, gethCommon}},
 	"cmd/evmsync":        {module: []string{"internal/gen"}},
-	fakechain:            {module: []string{"chain", "chainlog"}, external: []string{geth, keccak}},
-	"internal/invariant": {module: []string{"chain", "chainlog", "consumer", "tracker", fakechain}, external: []string{geth, keccak}, testing: true},
+	fakechain:            {module: []string{"chain", "chainlog"}, external: []string{gethCommon, keccak}},
+	"internal/invariant": {module: []string{"chain", "chainlog", "consumer", "tracker", fakechain}, external: []string{gethCommon, keccak}, testing: true},
 	"internal/archtest":  {},
 }

@@ -4,6 +4,7 @@
 package archtest
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -11,6 +12,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -114,7 +116,7 @@ func checkPackage(fset *token.FileSet, conf *types.Config, ctx *build.Context, r
 	}
 	for i, s := range srcs {
 		files[i] = s.file
-		c.rel[fset.Position(s.file.Pos()).Filename] = s.rel
+		c.rel[fset.PositionFor(s.file.Pos(), false).Filename] = s.rel
 	}
 	c.pkg, err = conf.Check(p.path, fset, files, c.info)
 	if err != nil {
@@ -134,7 +136,7 @@ func checkPackage(fset *token.FileSet, conf *types.Config, ctx *build.Context, r
 
 // add records a finding at pos.
 func (c *checker) add(pos token.Pos, rule, msg string) {
-	p := c.fset.Position(pos)
+	p := c.fset.PositionFor(pos, false) // ignore //line comments: findings point at the real file
 	c.found = append(c.found, finding{file: c.rel[p.Filename], line: p.Line, col: p.Column, rule: rule, msg: msg})
 }
 
@@ -298,7 +300,7 @@ func directives(fset *token.FileSet, s source) []directive {
 			if m == nil {
 				continue
 			}
-			pos := fset.Position(cm.Slash)
+			pos := fset.PositionFor(cm.Slash, false)
 			before := s.src[pos.Offset-(pos.Column-1) : pos.Offset]
 			line := pos.Line + 1
 			if strings.Trim(string(before), " \t") != "" {
@@ -347,15 +349,20 @@ func TestApplyPathRules(t *testing.T) {
 	var pkgs []pkgDir
 	for _, rel := range applyPath {
 		dir := filepath.Join(root, filepath.FromSlash(rel))
-		if _, err := os.Stat(dir); err == nil {
-			pkgs = append(pkgs, pkgDir{dir: dir, path: importPath(rel)})
+		_, err := os.Stat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkgs = append(pkgs, pkgDir{dir: dir, path: importPath(rel)})
 	}
-	fs, err := checkApplyPath(root, pkgs)
+	found, err := checkApplyPath(root, pkgs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report(t, "apply-path rules", fs)
+	report(t, "apply-path rules", found)
 }
 
 func TestApplyPathFixtures(t *testing.T) {
@@ -379,13 +386,62 @@ func TestApplyPathFixtures(t *testing.T) {
 	}
 }
 
-// TestApplyPathMore covers what the AT-REP-15 fixtures leave out: a map reached through an
-// embedded constraint interface, maps.All and maps.Values, and the parse error text.
-func TestApplyPathMore(t *testing.T) {
-	dir := t.TempDir()
-	src := `package more
+// writeFiles writes each name: content pair under dir, creating directories.
+func writeFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
-import "maps"
+// TestApplyPathExtra covers what the fixtures under testdata/applypath leave out: a map reached
+// through an embedded constraint, maps.All and maps.Values, the Sorted exception through
+// parentheses and SortedFunc, a go statement in a Run outside consumer and in another function of
+// consumer, a directive next to a non-AP4 finding, a block comment that is not a directive, and
+// //line comments, which must not move findings.
+func TestApplyPathExtra(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"extra/extra.go": extraSrc,
+		"consumer/c.go":  "package consumer\n\nfunc f() {}\n\nfunc g() {\n\tgo f()\n}\n",
+	})
+	fs, err := checkApplyPath(dir, []pkgDir{
+		{filepath.Join(dir, "consumer"), "fixture/consumer"},
+		{filepath.Join(dir, "extra"), "fixture/extra"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		goStmt  = "AP3: go statement is forbidden in apply-path code; only consumer.Run may start goroutines"
+		mapType = "AP4: range over map map[int]int has random order; range over sorted keys or annotate //evmsync:maporder <reason>"
+	)
+	equalLines(t, strs(fs), []string{
+		"consumer/c.go:6:2: " + goStmt,
+		"extra/extra.go:14:2: AP4: range over map T has random order; range over sorted keys or annotate //evmsync:maporder <reason>",
+		"extra/extra.go:21:2: " + goStmt,
+		"extra/extra.go:25:17: AP4: maps.All yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
+		"extra/extra.go:27:17: AP4: maps.Values yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
+		"extra/extra.go:29:11: AP1: wall-clock time: time.Now is forbidden in apply-path code; read time from the block",
+		"extra/extra.go:29:17: AP0: //evmsync:maporder suppresses no finding",
+		"extra/extra.go:33:2: " + mapType,
+		"extra/extra.go:40:2: " + mapType,
+	})
+}
+
+const extraSrc = `package extra
+
+import (
+	"maps"
+	"slices"
+	"time"
+)
 
 type A interface{ ~map[int]int }
 
@@ -396,31 +452,40 @@ func F[T B](m T) {
 	}
 }
 
-func G(m map[int]int) {
+func f() {}
+
+func Run() {
+	go f()
+}
+
+func G(m map[int]int) []int {
 	for range maps.All(m) {
 	}
 	for range maps.Values(m) {
 	}
+	_ = time.Now() //evmsync:maporder r
+	_ = slices.Sorted((maps.Keys(m)))
+	_ = slices.SortedFunc(maps.Keys(m), func(a, b int) int { return a - b })
+	/*evmsync:maporder r*/
+	for range m {
+	}
+	return slices.SortedStableFunc(maps.Values(m), func(a, b int) int { return a - b })
+}
+
+//line other.go:100:200
+func H(m map[int]int) {
+	for range m {
+	}
+	for range m { //evmsync:maporder r
+	}
 }
 `
-	if err := os.WriteFile(filepath.Join(dir, "more.go"), []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fs, err := checkApplyPath(dir, []pkgDir{{dir, "fixture/more"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	equalLines(t, strs(fs), []string{
-		"more.go:10:2: AP4: range over map T has random order; range over sorted keys or annotate //evmsync:maporder <reason>",
-		"more.go:15:17: AP4: maps.All yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
-		"more.go:17:17: AP4: maps.Values yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
-	})
 
+func TestApplyPathParseError(t *testing.T) {
+	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.go")
-	if err := os.WriteFile(bad, []byte("package more\n\nfunc\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err = checkApplyPath(dir, []pkgDir{{dir, "fixture/more"}})
+	writeFiles(t, dir, map[string]string{"bad.go": "package bad\n\nfunc\n"})
+	_, err := checkApplyPath(dir, []pkgDir{{dir, "fixture/bad"}})
 	if want := "archtest: parse " + bad + ": "; err == nil || !strings.HasPrefix(err.Error(), want) {
 		t.Errorf("error = %v, want prefix %q", err, want)
 	}
