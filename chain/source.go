@@ -24,8 +24,8 @@ import (
 //     balancer). Two Latest calls may return decreasing numbers, and Finalized may move backwards.
 //   - Results follow the "empty is nil" rule (nil Topics, Data and Logs when empty), give every log
 //     the BlockNumber and BlockHash of the block that holds it, list a block's logs in strictly
-//     increasing Index order, and belong to the caller: mutating a returned slice never changes a
-//     later result.
+//     increasing Index order with TxIndex non-decreasing, and belong to the caller: mutating a
+//     returned slice never changes a later result.
 //   - Every method that takes a Filter treats it as read-only and accepts every filter that
 //     Filter.Validate accepts. A source may return an error for a filter that Validate rejects.
 type Source interface {

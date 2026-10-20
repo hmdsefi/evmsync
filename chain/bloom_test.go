@@ -24,7 +24,7 @@ func nonZero(b Bloom) map[int]byte {
 	return m
 }
 
-// bloomVector is the AT-CHN-05 bloom of usdc with topics transfer and one32.
+// bloomVector returns the bloom of usdc with topics transfer and one32.
 func bloomVector() Bloom {
 	return BloomOf([]Log{{Address: usdc, Topics: []common.Hash{transfer, one32}}})
 }
@@ -85,6 +85,18 @@ func TestBloomVectors(t *testing.T) {
 	}
 	if BloomOf(nil) != (Bloom{}) {
 		t.Error("BloomOf(nil) is not the zero bloom")
+	}
+}
+
+func TestBloomTestNeedsAllBits(t *testing.T) {
+	// usdc sets bit masks 0x01, 0x01 and 0x80 in bytes 119, 129 and 227.
+	for _, idx := range []int{119, 129, 227} {
+		var b Bloom
+		b.Add(usdc[:])
+		b[idx] = 0
+		if b.Test(usdc[:]) {
+			t.Errorf("Test(usdc) with byte %d cleared = true, want false", idx)
+		}
 	}
 }
 
