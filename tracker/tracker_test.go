@@ -530,6 +530,25 @@ func TestInconsistentSource(t *testing.T) {
 			},
 		},
 		{
+			name: "cycle of three",
+			ans: func(e *env, h common.Hash) (chain.Header, error) {
+				switch h {
+				case common.HexToHash("0xf7"):
+					return chain.Header{Ref: chain.BlockRef{Number: 7, Hash: h, Parent: common.HexToHash("0xf6")}}, nil
+				case common.HexToHash("0xf6"):
+					return chain.Header{Ref: chain.BlockRef{Number: 6, Hash: h, Parent: common.HexToHash("0xf7")}}, nil
+				}
+				return chain.Header{}, nil
+			},
+			head: func(*env) chain.Header {
+				return chain.Header{Ref: chain.BlockRef{Number: 8, Hash: common.HexToHash("0xf8"), Parent: common.HexToHash("0xf7")}}
+			},
+			want: func(*env) string {
+				return "tracker: inconsistent source: block 6 " + common.HexToHash("0xf6").Hex() + " has parent " +
+					common.HexToHash("0xf7").Hex() + ", which is block 7 of the same branch"
+			},
+		},
+		{
 			name: "cycle of two",
 			ans: func(e *env, h common.Hash) (chain.Header, error) {
 				if h == common.HexToHash("0xf7") {
