@@ -33,3 +33,29 @@ func BenchmarkDecode(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkStateBlock checks and applies one linked block and a Finalize of the window's first
+// ref per iteration, so the window keeps 99,999 refs.
+func BenchmarkStateBlock(b *testing.B) {
+	const window = 99_999
+	s := NewState(0)
+	s.Apply(finalize(blk(0, 0)))
+	for n := uint64(1); n <= window; n++ {
+		s.Apply(block(blk(n, 0)))
+	}
+	next := uint64(window + 1)
+	b.ReportAllocs()
+	for b.Loop() {
+		e := block(blk(next, 0))
+		f := finalize(blk(next-window, 0))
+		if err := s.Check(e); err != nil {
+			b.Fatal(err)
+		}
+		s.Apply(e)
+		if err := s.Check(f); err != nil {
+			b.Fatal(err)
+		}
+		s.Apply(f)
+		next++
+	}
+}
