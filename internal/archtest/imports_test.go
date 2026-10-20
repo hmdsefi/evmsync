@@ -104,9 +104,10 @@ func checkImports(root string, inv []string, rs map[string]rule) ([]finding, err
 			if !ok {
 				continue
 			}
-			f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ImportsOnly)
+			path := filepath.Join(dir, name)
+			f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 			if err != nil {
-				return fmt.Errorf("archtest: %w", err)
+				return fmt.Errorf("archtest: parse %s: %w", path, err)
 			}
 			for _, imp := range f.Imports {
 				p, err := strconv.Unquote(imp.Path.Value)
@@ -196,5 +197,17 @@ func TestInventoryDuplicate(t *testing.T) {
 	}
 	if !slices.Contains(strs(fs), "chain:0:0: IB0: package chain is listed twice in the inventory") {
 		t.Errorf("no duplicate finding in:\n%s", strings.Join(strs(fs), "\n"))
+	}
+}
+
+func TestImportParseError(t *testing.T) {
+	root := copyFixture(t, "imports")
+	bad := filepath.Join(root, "chain", "broken.go")
+	if err := os.WriteFile(bad, []byte("package chain\n\nimport (\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := checkImports(root, inventory, rules)
+	if want := "archtest: parse " + bad + ": "; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %v, want prefix %q", err, want)
 	}
 }

@@ -95,7 +95,7 @@ func checkPackage(fset *token.FileSet, conf *types.Config, ctx *build.Context, r
 		}
 		f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 		if err != nil {
-			return nil, fmt.Errorf("archtest: %w", err)
+			return nil, fmt.Errorf("archtest: parse %s: %w", path, err)
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -376,5 +376,52 @@ func TestApplyPathFixtures(t *testing.T) {
 			}
 			equalLines(t, strs(fs), slices.DeleteFunc(strings.Split(string(want), "\n"), func(s string) bool { return s == "" }))
 		})
+	}
+}
+
+// TestApplyPathMore covers what the AT-REP-15 fixtures leave out: a map reached through an
+// embedded constraint interface, maps.All and maps.Values, and the parse error text.
+func TestApplyPathMore(t *testing.T) {
+	dir := t.TempDir()
+	src := `package more
+
+import "maps"
+
+type A interface{ ~map[int]int }
+
+type B interface{ A }
+
+func F[T B](m T) {
+	for range m {
+	}
+}
+
+func G(m map[int]int) {
+	for range maps.All(m) {
+	}
+	for range maps.Values(m) {
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "more.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := checkApplyPath(dir, []pkgDir{{dir, "fixture/more"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalLines(t, strs(fs), []string{
+		"more.go:10:2: AP4: range over map T has random order; range over sorted keys or annotate //evmsync:maporder <reason>",
+		"more.go:15:17: AP4: maps.All yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
+		"more.go:17:17: AP4: maps.Values yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>",
+	})
+
+	bad := filepath.Join(dir, "bad.go")
+	if err := os.WriteFile(bad, []byte("package more\n\nfunc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = checkApplyPath(dir, []pkgDir{{dir, "fixture/more"}})
+	if want := "archtest: parse " + bad + ": "; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %v, want prefix %q", err, want)
 	}
 }
