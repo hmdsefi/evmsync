@@ -94,6 +94,23 @@ func TestMemoryTruncateExact(t *testing.T) {
 			t.Errorf("retained record %d was cleared", i+12)
 		}
 	}
+
+	// A Finalize as the newest entry lets Truncate drop everything.
+	if _, err := m.Append(ctx, finalize(blk(12, 0))); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := m.Truncate(ctx, 100); err != nil {
+		t.Fatalf("Truncate(100): %v", err)
+	}
+	if o, _ := m.Oldest(ctx); o != 15 {
+		t.Errorf("Oldest with nothing retained = %d, want Head+1 = 15", o)
+	}
+	if len(m.recs) != 0 {
+		t.Errorf("backing store holds %d records, want 0", len(m.recs))
+	}
+	if es, err := m.Read(ctx, 15, 1); es != nil || err != nil {
+		t.Errorf("Read(15, 1) = %v, %v; want nil, nil", es, err)
+	}
 }
 
 func TestMemoryClosedReleases(t *testing.T) {
@@ -109,7 +126,9 @@ func TestMemoryClosedReleases(t *testing.T) {
 	}
 }
 
-// TestAppendCostFlat compares the cost of Append with a window of 99,000 refs and of 10 refs.
+// TestAppendCostFlat compares the cost of Append with a window of 99,000 refs and of 10 refs. Each
+// of the 1,000 steps appends a block and a Finalize of the window's first ref, so the window keeps
+// its length.
 func TestAppendCostFlat(t *testing.T) {
 	if raceEnabled {
 		t.Skip("the race detector distorts the timing")

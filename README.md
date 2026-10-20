@@ -52,6 +52,12 @@ only handle forward.
   your database.
 - **It's read-only.** It never sends transactions.
 
+## Roadmap
+
+evmsync is built in versions, and v0.4.0 is the first public release.
+[The roadmap issue](https://github.com/hmdsefi/evmsync/issues/84) lists each
+version's epics and shows their progress.
+
 ## Built with
 
 [gograph](https://github.com/hmdsefi/gograph) orders handlers by their table
