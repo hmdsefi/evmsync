@@ -6,6 +6,7 @@ package consumer_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hmdsefi/evmsync/chain"
 	"github.com/hmdsefi/evmsync/chainlog"
@@ -141,4 +142,26 @@ func offsets(from, to chainlog.Offset) []chainlog.Offset {
 		out = append(out, o)
 	}
 	return out
+}
+
+// bounded returns a context that ends 30 seconds after the test starts it, so a Run that should
+// return but waits at the tail fails the test with context.DeadlineExceeded instead of hanging.
+func bounded(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// waitFor returns the after of the next Wait call on log, and fails the test if Run, which sends
+// its result on done, returns first.
+func waitFor(t *testing.T, log *countingLog, done <-chan error) chainlog.Offset {
+	t.Helper()
+	select {
+	case after := <-log.waiting:
+		return after
+	case err := <-done:
+		t.Fatalf("Run returned %v before it waited at the tail", err)
+		return 0
+	}
 }

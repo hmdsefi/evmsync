@@ -6,6 +6,7 @@ package consumer_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,19 +26,23 @@ func tenEntryLog(t *testing.T) *chainlog.Memory {
 // runTo runs Run over log with c wrapped in a canceler at offset at, and returns Run's error.
 func runTo(t *testing.T, log chainlog.Log, c consumer.Consumer, at chainlog.Offset) error {
 	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(bounded(t))
 	defer cancel()
 	return consumer.Run(ctx, log, &canceler{Consumer: c, at: at, cancel: cancel})
 }
 
 func TestRunFromOffset(t *testing.T) {
 	r := &recorder{off: 3}
-	err := runTo(t, tenEntryLog(t), r, 10)
+	log := &countingLog{Log: tenEntryLog(t)}
+	err := runTo(t, log, r, 10)
 	if err != context.Canceled {
 		t.Fatalf("Run = %v, want context.Canceled", err)
 	}
 	if want := offsets(4, 10); !slices.Equal(r.applied, want) {
 		t.Errorf("applied = %v, want %v", r.applied, want)
+	}
+	if len(log.reads) != 1 {
+		t.Errorf("Run called Read %d times, want 1: it stops once it sees the context end", len(log.reads))
 	}
 }
 
@@ -51,7 +56,7 @@ func TestRunBatchesAndWait(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runTo(t, log, r, 650) }()
 
-	if after := <-log.waiting; after != 600 {
+	if after := waitFor(t, log, done); after != 600 {
 		t.Fatalf("first Wait after %d, want 600", after)
 	}
 	if _, err := inner.Append(t.Context(), all[600:]...); err != nil {
@@ -92,7 +97,7 @@ func (c offsetFunc) Apply(context.Context, chainlog.Entry) error {
 
 func TestRunContext(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancel(bounded(t))
 		cancel()
 		log := &countingLog{Log: tenEntryLog(t)}
 		c := offsetFunc{t: t, offset: func(context.Context) (chainlog.Offset, error) {
@@ -107,7 +112,7 @@ func TestRunContext(t *testing.T) {
 		}
 	})
 	t.Run("offset cancels", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancel(bounded(t))
 		defer cancel()
 		c := offsetFunc{t: t, offset: func(context.Context) (chainlog.Offset, error) {
 			cancel()
@@ -131,7 +136,7 @@ func TestRunOffsetError(t *testing.T) {
 	c := offsetFunc{t: t, offset: func(context.Context) (chainlog.Offset, error) {
 		return 0, errors.New("connection reset")
 	}}
-	err := consumer.Run(t.Context(), tenEntryLog(t), c)
+	err := consumer.Run(bounded(t), tenEntryLog(t), c)
 	if got, want := errText(err), "consumer: offset: connection reset"; got != want {
 		t.Errorf("Run = %q, want %q", got, want)
 	}
@@ -142,19 +147,36 @@ func TestRunHeadError(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	err := consumer.Run(t.Context(), log, &recorder{})
+	err := consumer.Run(bounded(t), log, &recorder{})
 	if !errors.Is(err, chainlog.ErrClosed) {
 		t.Errorf("Run = %v, want an error that Is chainlog.ErrClosed", err)
 	}
 	if got, want := errText(err), "consumer: log head: chainlog: log closed"; got != want {
 		t.Errorf("Run = %q, want %q", got, want)
 	}
+
+	ctx, cancel := context.WithCancel(bounded(t))
+	defer cancel()
+	if err := consumer.Run(ctx, headCancelLog{Log: tenEntryLog(t), cancel: cancel}, &recorder{}); err != context.Canceled {
+		t.Errorf("Run with a Head that cancels and fails = %v, want context.Canceled", err)
+	}
+}
+
+// headCancelLog wraps a log whose Head calls cancel and fails.
+type headCancelLog struct {
+	chainlog.Log
+	cancel context.CancelFunc
+}
+
+func (l headCancelLog) Head(context.Context) (chainlog.Offset, error) {
+	l.cancel()
+	return 0, errors.New("connection reset")
 }
 
 func TestRunAheadOfLog(t *testing.T) {
 	log := &countingLog{Log: tenEntryLog(t)}
 	r := &recorder{off: 11}
-	err := consumer.Run(t.Context(), log, r)
+	err := consumer.Run(bounded(t), log, r)
 	if !errors.Is(err, consumer.ErrAheadOfLog) {
 		t.Fatalf("Run = %v, want an error that Is ErrAheadOfLog", err)
 	}
@@ -173,7 +195,7 @@ func TestRunBehindLog(t *testing.T) {
 		t.Fatalf("Truncate: %v", err)
 	}
 	r := &recorder{off: 1}
-	err := consumer.Run(t.Context(), log, r)
+	err := consumer.Run(bounded(t), log, r)
 	if !errors.Is(err, consumer.ErrBehindLog) || !errors.Is(err, chainlog.ErrTruncated) {
 		t.Fatalf("Run = %v, want an error that Is ErrBehindLog and chainlog.ErrTruncated", err)
 	}
@@ -197,15 +219,18 @@ func (l errLog) Read(context.Context, chainlog.Offset, int) ([]chainlog.Entry, e
 
 func TestRunReadError(t *testing.T) {
 	log := errLog{Log: tenEntryLog(t), err: errors.New("disk read")}
-	err := consumer.Run(t.Context(), log, &recorder{off: 2})
+	err := consumer.Run(bounded(t), log, &recorder{off: 2})
 	if got, want := errText(err), "consumer: read from offset 3: disk read"; got != want {
 		t.Errorf("Run = %q, want %q", got, want)
 	}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	canceling := cancelLog{Log: log, cancel: cancel}
-	if err := consumer.Run(ctx, canceling, &recorder{}); err != context.Canceled {
-		t.Errorf("Run with a Read that cancels = %v, want context.Canceled", err)
+	for _, readErr := range []error{errors.New("disk read"), fmt.Errorf("%w: read from 1, oldest is 2", chainlog.ErrTruncated)} {
+		ctx, cancel := context.WithCancel(bounded(t))
+		canceling := cancelLog{Log: errLog{Log: tenEntryLog(t), err: readErr}, cancel: cancel}
+		if err := consumer.Run(ctx, canceling, &recorder{}); err != context.Canceled {
+			t.Errorf("Run with a Read that cancels and fails with %q = %v, want context.Canceled", readErr, err)
+		}
+		cancel()
 	}
 }
 
@@ -264,7 +289,7 @@ func TestRunApplyErrorKinds(t *testing.T) {
 		{6, "consumer: apply offset 6 (block): boom"},
 	} {
 		r := &recorder{failAt: tt.at, failErr: errors.New("boom")}
-		err := consumer.Run(t.Context(), log, r)
+		err := consumer.Run(bounded(t), log, r)
 		if got := errText(err); got != tt.want {
 			t.Errorf("Run failing at %d = %q, want %q", tt.at, got, tt.want)
 		}
@@ -274,14 +299,26 @@ func TestRunApplyErrorKinds(t *testing.T) {
 	}
 }
 
+// cancelApply is a consumer at offset 0 whose Apply calls cancel and returns ctx.Err().
+type cancelApply struct{ cancel context.CancelFunc }
+
+func (cancelApply) Offset(context.Context) (chainlog.Offset, error) { return 0, nil }
+
+func (c cancelApply) Apply(ctx context.Context, _ chainlog.Entry) error {
+	c.cancel()
+	return ctx.Err()
+}
+
 func TestRunApplyErrorWrapsContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(bounded(t))
 	defer cancel()
-	r := &recorder{failAt: 1, failErr: context.Canceled}
-	err := consumer.Run(ctx, tenEntryLog(t), r)
+	err := consumer.Run(ctx, tenEntryLog(t), cancelApply{cancel: cancel})
 	var ae *consumer.ApplyError
-	if !errors.As(err, &ae) || !errors.Is(err, context.Canceled) {
+	if err == context.Canceled || !errors.As(err, &ae) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v, want an *ApplyError wrapping context.Canceled", err)
+	}
+	if got, want := err.Error(), "consumer: apply offset 1 (finalize): context canceled"; got != want {
+		t.Errorf("Run = %q, want %q", got, want)
 	}
 }
 
@@ -307,28 +344,34 @@ func TestApplyErrorText(t *testing.T) {
 	}
 }
 
-// gapLog wraps a log whose Read from offset 4 returns the entries with offsets 4 and 6.
-type gapLog struct{ chainlog.Log }
+// gapLog wraps a log whose Read from offset 4 returns the entry with offset 4 and then the one
+// with offset second.
+type gapLog struct {
+	chainlog.Log
+	second chainlog.Offset
+}
 
 func (l gapLog) Read(ctx context.Context, from chainlog.Offset, max int) ([]chainlog.Entry, error) {
 	es, err := l.Log.Read(ctx, from, max)
 	if from == 4 && err == nil && len(es) >= 3 {
-		es = []chainlog.Entry{es[0], es[2]}
+		es = []chainlog.Entry{es[0], es[l.second-4]}
 	}
 	return es, err
 }
 
 func TestRunOffsetGap(t *testing.T) {
-	r := &recorder{off: 3}
-	err := consumer.Run(t.Context(), gapLog{tenEntryLog(t)}, r)
-	if !errors.Is(err, consumer.ErrOffsetGap) {
-		t.Fatalf("Run = %v, want an error that Is ErrOffsetGap", err)
-	}
-	if got, want := err.Error(), "consumer: log offsets are not contiguous: got offset 6, want 5"; got != want {
-		t.Errorf("Run = %q, want %q", got, want)
-	}
-	if want := []chainlog.Offset{4}; !slices.Equal(r.calls, want) {
-		t.Errorf("Apply calls %v, want %v", r.calls, want)
+	for _, second := range []chainlog.Offset{6, 4} {
+		r := &recorder{off: 3}
+		err := consumer.Run(bounded(t), gapLog{Log: tenEntryLog(t), second: second}, r)
+		if !errors.Is(err, consumer.ErrOffsetGap) {
+			t.Fatalf("Run with offsets 4, %d = %v, want an error that Is ErrOffsetGap", second, err)
+		}
+		if got, want := err.Error(), fmt.Sprintf("consumer: log offsets are not contiguous: got offset %d, want 5", second); got != want {
+			t.Errorf("Run = %q, want %q", got, want)
+		}
+		if want := []chainlog.Offset{4}; !slices.Equal(r.calls, want) {
+			t.Errorf("Run with offsets 4, %d: Apply calls %v, want %v", second, r.calls, want)
+		}
 	}
 }
 
@@ -340,7 +383,7 @@ func TestRunRestart(t *testing.T) {
 	if err := runTo(t, log, r, 3); err != context.Canceled {
 		t.Fatalf("Run to 3 = %v, want context.Canceled", err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(bounded(t))
 	cancel()
 	if err := consumer.Run(ctx, log, r); err != context.Canceled {
 		t.Fatalf("Run with a canceled context = %v, want context.Canceled", err)
@@ -369,9 +412,9 @@ func TestRunLogClosed(t *testing.T) {
 	r := &recorder{}
 
 	done := make(chan error, 1)
-	go func() { done <- consumer.Run(t.Context(), log, r) }()
+	go func() { done <- consumer.Run(bounded(t), log, r) }()
 
-	if after := <-log.waiting; after != 10 {
+	if after := waitFor(t, log, done); after != 10 {
 		t.Fatalf("Wait after %d, want 10", after)
 	}
 	if err := inner.Close(); err != nil {
@@ -390,11 +433,11 @@ func TestRunLogClosed(t *testing.T) {
 }
 
 func TestRunWaitCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(bounded(t))
 	log := &countingLog{Log: tenEntryLog(t), waiting: make(chan chainlog.Offset)}
 	done := make(chan error, 1)
 	go func() { done <- consumer.Run(ctx, log, &recorder{}) }()
-	<-log.waiting
+	waitFor(t, log, done)
 	cancel()
 	if err := <-done; err != context.Canceled {
 		t.Fatalf("Run = %v, want context.Canceled", err)
