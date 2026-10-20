@@ -1,0 +1,1 @@
+alias.go:6:12: AP1: wall-clock time: time.Now is forbidden in apply-path code; read time from the block
