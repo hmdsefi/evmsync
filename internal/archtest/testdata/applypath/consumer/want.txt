@@ -1,0 +1,1 @@
+consumer.go:15:2: AP3: go statement is forbidden in apply-path code; only consumer.Run may start goroutines
