@@ -15,9 +15,9 @@ import (
 )
 
 // TestMemoryPendingBounded runs 10,000 blocks with finality 5 blocks behind the tip and a
-// depth-2 revert every 100 blocks. The pending array stays small, every slot outside the live
-// blocks is zero, so retired blocks and their logs can be collected, and a Finalize of every
-// pending block drops the snapshot.
+// depth-2 revert every 100 blocks. The pending array stays small and every slot outside the live
+// blocks is zero, so retired blocks and their logs can be collected. A Finalize of every pending
+// block drops the snapshot.
 func TestMemoryPendingBounded(t *testing.T) {
 	m := NewMemory([]uint64{},
 		func(s []uint64, b chain.Block) []uint64 { return append(s, b.Ref.Number) },
@@ -69,7 +69,11 @@ func TestMemoryPendingBounded(t *testing.T) {
 		}
 		checkSlots(n)
 	}
-	if got := m.State(); len(got) != 10_000 || got[9_999] != 10_000 {
+	want := make([]uint64, 10_000)
+	for i := range want {
+		want[i] = uint64(i) + 1
+	}
+	if got := m.State(); !slices.Equal(got, want) {
 		t.Fatalf("State() has %d numbers, want 1 to 10000", len(got))
 	}
 

@@ -30,7 +30,7 @@ type Memory[S any] struct {
 	// pending[first:] are the non-final blocks applied since base, ascending by number; the
 	// dead prefix pending[:first] is zeroed. Guarded by mu.
 	pending []chain.Block
-	first   int
+	first   int             // the index of the oldest live pending block; guarded by mu
 	base    chain.BlockRef  // the ref below the pending blocks; guarded by mu
 	off     chainlog.Offset // the committed offset; guarded by mu
 }
@@ -80,7 +80,7 @@ func (m *Memory[S]) Apply(_ context.Context, e chainlog.Entry) error {
 		}
 		m.revert(i)
 	case chainlog.KindFinalize:
-		live := m.pending[m.first:]
+		live := m.live()
 		k := sort.Search(len(live), func(i int) bool { return live[i].Ref.Number > e.To.Number })
 		if k > 0 && live[k-1].Ref.Number == e.To.Number && live[k-1].Ref.Hash != e.To.Hash {
 			return fmt.Errorf("%w: finalize %d %s conflicts with applied block %s", ErrBadEntry, e.To.Number, e.To.Hash.Hex(), live[k-1].Ref.Hash.Hex())
@@ -104,10 +104,10 @@ func (m *Memory[S]) State() S {
 // blocks pending, which a log never sends, it is applied as a non-final block.
 func (m *Memory[S]) block(b chain.Block, final bool) {
 	switch {
-	case m.first == len(m.pending) && final:
+	case len(m.live()) == 0 && final:
 		m.cur = m.apply(m.cur, b)
 		m.base = b.Ref
-	case m.first == len(m.pending):
+	case len(m.live()) == 0:
 		m.snap = m.clone(m.cur)
 		m.cur = m.apply(m.cur, b)
 		m.pending = append(m.pending, b)
@@ -123,7 +123,7 @@ func (m *Memory[S]) revertTarget(to chain.BlockRef) (int, bool) {
 	if to.Number == m.base.Number && to.Hash == m.base.Hash {
 		return -1, true
 	}
-	live := m.pending[m.first:]
+	live := m.live()
 	for i := len(live) - 1; i >= 0 && live[i].Ref.Number >= to.Number; i-- {
 		if live[i].Ref.Number == to.Number {
 			return i, live[i].Ref.Hash == to.Hash
@@ -134,7 +134,7 @@ func (m *Memory[S]) revertTarget(to chain.BlockRef) (int, bool) {
 
 // revert makes the state the one at pending block i, or at the base when i is -1.
 func (m *Memory[S]) revert(i int) {
-	live := m.pending[m.first:]
+	live := m.live()
 	switch {
 	case i == len(live)-1:
 		// The target is the newest block, or the base with nothing pending: nothing changes.
@@ -155,7 +155,7 @@ func (m *Memory[S]) revert(i int) {
 // finalize makes the first k pending blocks final and moves the base to to when it is not below
 // the base.
 func (m *Memory[S]) finalize(k int, to chain.BlockRef) {
-	if live := m.pending[m.first:]; k == len(live) {
+	if live := m.live(); k == len(live) {
 		m.clearPending()
 	} else {
 		for _, b := range live[:k] {
@@ -165,7 +165,7 @@ func (m *Memory[S]) finalize(k int, to chain.BlockRef) {
 		m.first += k
 		// Copy the live blocks down once the dead prefix fills half the array, so appends reuse it.
 		if m.first > cap(m.pending)/2 {
-			n := copy(m.pending, m.pending[m.first:])
+			n := copy(m.pending, m.live())
 			clear(m.pending[n:])
 			m.pending = m.pending[:n]
 			m.first = 0
@@ -175,6 +175,9 @@ func (m *Memory[S]) finalize(k int, to chain.BlockRef) {
 		m.base = to
 	}
 }
+
+// live returns the pending blocks.
+func (m *Memory[S]) live() []chain.Block { return m.pending[m.first:] }
 
 // clearPending drops every pending block and the snapshot.
 func (m *Memory[S]) clearPending() {

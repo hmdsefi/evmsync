@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -115,8 +116,31 @@ func TestMemoryFinalBlockWhilePending(t *testing.T) {
 	m, tr := newTraceMemory()
 	applyAll(t, m, fin(a[0]), blk(c, a[1]), fblk(c, a[2]))
 	check(t, m, tr, []uint64{1, 2}, 2, 1)
+	applyAll(t, m, rev(a[2])) // the newest pending block, not the base
+	check(t, m, tr, []uint64{1, 2}, 2, 1)
 	applyAll(t, m, rev(a[1]))
 	check(t, m, tr, []uint64{1}, 3, 2)
+	applyAll(t, m, rev(a[0])) // G is still the base
+	check(t, m, tr, nil, 3, 2)
+}
+
+// TestMemoryRevertInPlaceState reverts a state that apply changes in place, so a snapshot that
+// shared memory with the current state would show the reverted blocks.
+func TestMemoryRevertInPlaceState(t *testing.T) {
+	c, a := refs(t, 3)
+	apply := func(s map[uint64]bool, b chain.Block) map[uint64]bool {
+		s[b.Ref.Number] = true
+		return s
+	}
+	m := consumer.NewMemory(map[uint64]bool{}, apply, maps.Clone)
+	applyAll(t, m, fin(a[0]), blk(c, a[1]), blk(c, a[2]), blk(c, a[3]), rev(a[1]))
+	if got := slices.Sorted(maps.Keys(m.State())); !slices.Equal(got, []uint64{1}) {
+		t.Errorf("after rev(A1): State() keys %v, want [1]", got)
+	}
+	applyAll(t, m, rev(a[0]))
+	if got := m.State(); len(got) != 0 {
+		t.Errorf("after rev(G): State() = %v, want no keys", got)
+	}
 }
 
 func TestMemoryRevertToBaseWithoutPending(t *testing.T) {
@@ -273,12 +297,27 @@ func TestMemoryConcurrentState(t *testing.T) {
 		s[b.Ref.Number] = b.Ref.Number
 		return s
 	}
-	m := consumer.NewMemory(map[uint64]uint64{}, apply, maps.Clone)
+	// A range loop, unlike maps.Clone, makes the race detector see clone's reads.
+	clone := func(s map[uint64]uint64) map[uint64]uint64 {
+		out := make(map[uint64]uint64, len(s))
+		for k, v := range s {
+			out[k] = v
+		}
+		return out
+	}
+	m := consumer.NewMemory(map[uint64]uint64{}, apply, clone)
 
 	ctx, cancel := context.WithCancel(bounded(t))
 	defer cancel()
+	started := make(chan struct{})
+	watched := &firstApply{Consumer: &canceler{Consumer: m, at: n, cancel: cancel}, started: started}
 	done := make(chan error, 1)
-	go func() { done <- consumer.Run(ctx, log, &canceler{Consumer: m, at: n, cancel: cancel}) }()
+	go func() { done <- consumer.Run(ctx, log, watched) }()
+	select { // call State while Run applies, not before
+	case <-started:
+	case err := <-done:
+		t.Fatalf("Run = %v before its first Apply", err)
+	}
 	for i := range 1_000 {
 		s := m.State()
 		s[uint64(n+1+i)] = 0 // the caller owns the result
@@ -301,6 +340,21 @@ func TestMemoryConcurrentState(t *testing.T) {
 	}
 }
 
+// firstApply wraps a consumer and closes started after its first successful Apply.
+type firstApply struct {
+	consumer.Consumer
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *firstApply) Apply(ctx context.Context, e chainlog.Entry) error {
+	err := s.Consumer.Apply(ctx, e)
+	if err == nil {
+		s.once.Do(func() { close(s.started) })
+	}
+	return err
+}
+
 func TestNewMemoryPanics(t *testing.T) {
 	_, apply, clone := newTrace()
 	for _, tt := range []struct {
@@ -311,9 +365,11 @@ func TestNewMemoryPanics(t *testing.T) {
 		{"nil apply", func() { consumer.NewMemory([]uint64{}, nil, clone) }, "evmsync: consumer.NewMemory: nil apply function"},
 		{"nil clone", func() { consumer.NewMemory([]uint64{}, apply, nil) }, "evmsync: consumer.NewMemory: nil clone function"},
 	} {
-		if got := panicText(tt.f); got != tt.want {
-			t.Errorf("%s: panic %q, want %q", tt.name, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := panicText(tt.f); got != tt.want {
+				t.Errorf("panic %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
