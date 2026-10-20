@@ -90,13 +90,16 @@ func ioErr(op, path string, err error) error {
 	return fmt.Errorf("wal: %s %s: %w", op, path, err)
 }
 
-// writeFileAtomic replaces dir/name with data: it writes and closes name.tmp, fsyncs it when sync
-// is set, renames it to name, and then fsyncs dir when sync is set. With sync set, a crash leaves
+// syncer fsyncs a file or a directory. A nil syncer means no fsync (SyncNever).
+type syncer func(f *os.File) error
+
+// writeFileAtomic replaces dir/name with data: it writes name.tmp, fsyncs it with fsync, closes
+// it, renames it to name, and then fsyncs dir with fsync. With a non-nil fsync, a crash leaves
 // either the old file or the new one, and possibly name.tmp, which Open deletes. On an error it
 // removes name.tmp.
-func writeFileAtomic(dir, name string, data []byte, sync bool) error {
+func writeFileAtomic(dir, name string, data []byte, fsync syncer) error {
 	tmp := filepath.Join(dir, name+".tmp")
-	if err := writeFile(tmp, data, sync); err != nil {
+	if err := writeFile(tmp, data, fsync); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -105,14 +108,11 @@ func writeFileAtomic(dir, name string, data []byte, sync bool) error {
 		_ = os.Remove(tmp)
 		return ioErr("rename", path, err)
 	}
-	if sync {
-		return syncDir(dir)
-	}
-	return nil
+	return syncDir(dir, fsync)
 }
 
-// writeFile creates path with data, fsyncs it when sync is set, and closes it.
-func writeFile(path string, data []byte, sync bool) error {
+// writeFile creates path with data, fsyncs it with fsync, and closes it.
+func writeFile(path string, data []byte, fsync syncer) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode) //nolint:gosec // a file name the WAL owns
 	if err != nil {
 		return ioErr("open", path, err)
@@ -120,8 +120,8 @@ func writeFile(path string, data []byte, sync bool) error {
 	if _, err := f.Write(data); err != nil {
 		return errors.Join(ioErr("write", path, err), f.Close())
 	}
-	if sync {
-		if err := f.Sync(); err != nil {
+	if fsync != nil {
+		if err := fsync(f); err != nil {
 			return errors.Join(ioErr("sync", path, err), f.Close())
 		}
 	}
@@ -131,13 +131,17 @@ func writeFile(path string, data []byte, sync bool) error {
 	return nil
 }
 
-// syncDir fsyncs the directory dir, so the names created, renamed or removed in it are durable.
-func syncDir(dir string) error {
+// syncDir fsyncs the directory dir with fsync, so the names created, renamed or removed in it are
+// durable. With a nil fsync it does nothing.
+func syncDir(dir string, fsync syncer) error {
+	if fsync == nil {
+		return nil
+	}
 	d, err := os.Open(dir) //nolint:gosec // dir is the log's own directory
 	if err != nil {
 		return ioErr("open", dir, err)
 	}
-	if err := d.Sync(); err != nil {
+	if err := fsync(d); err != nil {
 		return errors.Join(ioErr("sync", dir, err), d.Close())
 	}
 	if err := d.Close(); err != nil {

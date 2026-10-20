@@ -15,13 +15,13 @@ import (
 	"github.com/hmdsefi/evmsync/chainlog"
 )
 
-// ref returns block n of chain f, linked to block n-1 of the same chain.
-func ref(n uint64, f byte) chain.BlockRef {
+// ref returns block n of a chain whose hashes are as in logtest, linked to block n-1.
+func ref(n uint64) chain.BlockRef {
 	r := chain.BlockRef{Number: n, Time: 1_700_000_000 + 12*n}
-	r.Hash[0] = 0xb0 | f
+	r.Hash[0] = 0xb0
 	binary.BigEndian.PutUint64(r.Hash[24:], n)
 	if n > 0 {
-		r.Parent[0] = 0xb0 | f
+		r.Parent[0] = 0xb0
 		binary.BigEndian.PutUint64(r.Parent[24:], n-1)
 	}
 	return r
@@ -30,9 +30,9 @@ func ref(n uint64, f byte) chain.BlockRef {
 // testState is the state after Finalize 2 and blocks 3, 4, 5: a window of 3.
 func testState() chainlog.State {
 	s := chainlog.NewState(0)
-	s.Apply(chainlog.Entry{Kind: chainlog.KindFinalize, To: ref(2, 0)})
+	s.Apply(chainlog.Entry{Kind: chainlog.KindFinalize, To: ref(2)})
 	for n := uint64(3); n <= 5; n++ {
-		s.Apply(chainlog.Entry{Kind: chainlog.KindBlock, Block: chain.Block{Ref: ref(n, 0)}})
+		s.Apply(chainlog.Entry{Kind: chainlog.KindBlock, Block: chain.Block{Ref: ref(n)}})
 	}
 	return s
 }
@@ -64,7 +64,7 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeCheckpoint with cap 2: %v", err)
 	}
-	next := chainlog.Entry{Kind: chainlog.KindBlock, Block: chain.Block{Ref: ref(6, 0)}}
+	next := chainlog.Entry{Kind: chainlog.KindBlock, Block: chain.Block{Ref: ref(6)}}
 	if err := small.state.Check(next); err == nil || !strings.HasSuffix(err.Error(), "window is full (2 blocks)") {
 		t.Errorf("Check after decoding with cap 2 = %v, want a full window of 2 blocks", err)
 	}
