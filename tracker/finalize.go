@@ -45,7 +45,10 @@ func (t *Tracker) Finalize(ctx context.Context, f chain.BlockRef) ([]chainlog.En
 		t.finalizeTo(stored)
 		return []chainlog.Entry{finalizeEntry(stored)}, nil
 	}
-	_, entries, err := t.walk(ctx, f)
+	if err := t.checkCap(f); err != nil {
+		return nil, err
+	}
+	_, entries, err := t.walk(ctx, f, 1)
 	if err != nil {
 		return nil, err
 	}
