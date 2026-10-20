@@ -52,7 +52,7 @@ func benchChain(n int) ([]chain.BlockRef, *benchSource) {
 	refs := make([]chain.BlockRef, n)
 	src := &benchSource{headers: make(map[common.Hash]chain.Header, n)}
 	for i := range refs {
-		refs[i] = chain.BlockRef{Number: uint64(i), Hash: hash(i)} //nolint:gosec // i >= 0
+		refs[i] = chain.BlockRef{Number: uint64(i), Hash: hash(i)}
 		if i > 0 {
 			refs[i].Parent = refs[i-1].Hash
 		}

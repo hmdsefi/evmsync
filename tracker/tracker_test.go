@@ -32,6 +32,9 @@ func TestAnchoring(t *testing.T) {
 	got, err = e.head(t, chain.BlockRef{Number: 3})
 	wantErr(t, err, tracker.ErrInconsistentSource, "tracker: inconsistent source: zero block hash")
 	e.want(t, got)
+	got, err = e.finalize(t, chain.BlockRef{Number: 7})
+	wantErr(t, err, tracker.ErrInconsistentSource, "tracker: inconsistent source: zero block hash")
+	e.want(t, got)
 
 	got = e.mustFinalize(t, a[6])
 	e.want(t, got, e.fin(a[6]))
@@ -79,6 +82,19 @@ func TestNewPanics(t *testing.T) {
 			"tip not the last window block",
 			e.src, tracker.Config{}, stateOf(e.fin(e.g), e.blk(a[0]), e.blk(a[1]),
 				e.rev(chain.BlockRef{Number: 1, Hash: common.HexToHash("0x01")})),
+			"evmsync: tracker.New: window is not a parent-linked chain above the finalized block",
+		},
+		{
+			"tip without finalized and an empty window",
+			e.src, tracker.Config{}, stateOf(e.blk(a[0]), e.rev(e.g)),
+			"evmsync: tracker.New: state has blocks but no finalized block",
+		},
+		{
+			"window block at the wrong height",
+			e.src, tracker.Config{}, stateOf(e.fin(e.g), chainlog.Entry{
+				Kind:  chainlog.KindBlock,
+				Block: chain.Block{Ref: chain.BlockRef{Number: 2, Hash: common.HexToHash("0x02"), Parent: e.g.Hash}},
+			}),
 			"evmsync: tracker.New: window is not a parent-linked chain above the finalized block",
 		},
 		{
@@ -182,19 +198,17 @@ func TestExtendByOne(t *testing.T) {
 func TestDuplicates(t *testing.T) {
 	e := tracked(t, 6)
 	before := viewOf(e.tr.State())
-	for _, h := range []chain.BlockRef{e.refs(6, 6)[0], e.refs(3, 3)[0], e.g} {
+	for _, h := range []chain.BlockRef{e.ref(6), e.ref(3), e.g} {
 		got := e.mustHead(t, h)
 		e.want(t, got)
 		e.wantCalls(t, "")
 	}
-	if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-		t.Errorf("state changed: %+v, want %+v", after, before)
-	}
+	e.unchanged(t, before)
 }
 
 func TestLaggingProvider(t *testing.T) {
 	e := tracked(t, 8)
-	e.mustFinalize(t, e.refs(5, 5)[0])
+	e.mustFinalize(t, e.ref(5))
 	for _, h := range e.refs(4, 5) {
 		e.want(t, e.mustHead(t, h))
 		e.wantCalls(t, "")
@@ -219,13 +233,13 @@ func TestDepthOneReorg(t *testing.T) {
 	e := tracked(t, 5)
 	b := e.reorg("B", 1, 1)
 	got := e.mustHead(t, b[0])
-	e.want(t, got, e.rev(e.refs(4, 4)[0]), e.blk(b[0]))
+	e.want(t, got, e.rev(e.ref(4)), e.blk(b[0]))
 	e.wantCalls(t, "L(B5)")
 }
 
 func TestDepthNReorg(t *testing.T) {
 	e := tracked(t, 10)
-	a6 := e.refs(6, 6)[0]
+	a6 := e.ref(6)
 	b := e.reorg("B", 4, 4)
 	got := e.mustHead(t, b[3])
 	e.want(t, got, append([]chainlog.Entry{e.rev(a6)}, e.blks(b...)...)...)
@@ -234,7 +248,7 @@ func TestDepthNReorg(t *testing.T) {
 
 func TestReorgDuringGapFill(t *testing.T) {
 	e := tracked(t, 5)
-	a3 := e.refs(3, 3)[0]
+	a3 := e.ref(3)
 	b := e.reorg("B", 2, 5)
 	got := e.mustHead(t, b[4])
 	e.want(t, got, append([]chainlog.Entry{e.rev(a3)}, e.blks(b...)...)...)
@@ -243,7 +257,7 @@ func TestReorgDuringGapFill(t *testing.T) {
 
 func TestShorterBranch(t *testing.T) {
 	e := tracked(t, 6)
-	a4 := e.refs(4, 4)[0]
+	a4 := e.ref(4)
 	b5 := e.reorg("B", 2, 1)[0]
 	e.want(t, e.mustHead(t, b5))
 	e.wantCalls(t, "")
@@ -265,7 +279,7 @@ func TestSameHeightSibling(t *testing.T) {
 
 func TestRollback(t *testing.T) {
 	e := tracked(t, 6)
-	a3 := e.refs(3, 3)[0]
+	a3 := e.ref(3)
 	e.reorg("A", 3, 0)
 	e.want(t, e.mustHead(t, a3))
 	e.wantCalls(t, "")
@@ -282,7 +296,7 @@ func TestRollback(t *testing.T) {
 
 func TestWalkReachesFinalized(t *testing.T) {
 	e := tracked(t, 8)
-	a5 := e.refs(5, 5)[0]
+	a5 := e.ref(5)
 	e.mustFinalize(t, a5)
 	before := viewOf(e.tr.State())
 	b := e.reorg("B", 5, 6) // B4…B9
@@ -291,9 +305,7 @@ func TestWalkReachesFinalized(t *testing.T) {
 		b[2].Hash.Hex()+" does not descend from finalized block 5 "+a5.Hash.Hex())
 	e.want(t, got)
 	e.wantCalls(t, "H(B8) H(B7) H(B6)")
-	if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-		t.Errorf("state changed: %+v, want %+v", after, before)
-	}
+	e.unchanged(t, before)
 }
 
 func TestDroppedFork(t *testing.T) {
@@ -310,9 +322,7 @@ func TestDroppedFork(t *testing.T) {
 		b[0].Hash.Hex()+": "+chain.ErrNotFound.Error())
 	e.want(t, got)
 	e.wantCalls(t, "H(B4)")
-	if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-		t.Errorf("state changed: %+v, want %+v", after, before)
-	}
+	e.unchanged(t, before)
 
 	got = e.mustHead(t, c[3])
 	e.want(t, got, append([]chainlog.Entry{e.rev(a[1])}, e.blks(c...)...)...)
@@ -380,12 +390,10 @@ func TestErrorsKeepState(t *testing.T) {
 			if calls := strings.Join(e.calls(), " "); calls != strings.Join(healthyCalls[:k], " ") {
 				t.Errorf("calls = %q, want %q", calls, strings.Join(healthyCalls[:k], " "))
 			}
-			if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-				t.Errorf("state changed: %+v, want %+v", after, before)
-			}
+			e.unchanged(t, before)
 			fs.failAt = 0
 			got = e.mustHead(t, b[4])
-			e.want(t, got, append([]chainlog.Entry{e.rev(e.refs(3, 3)[0])}, e.blks(b...)...)...)
+			e.want(t, got, append([]chainlog.Entry{e.rev(e.ref(3))}, e.blks(b...)...)...)
 		})
 	}
 	t.Run("context canceled during the walk", func(t *testing.T) {
@@ -410,9 +418,7 @@ func TestErrorsKeepState(t *testing.T) {
 		wantErr(t, err, context.Canceled, "tracker: context canceled")
 		e.want(t, got)
 		e.wantCalls(t, "H(B7) H(B6) H(B5) H(B4)")
-		if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-			t.Errorf("state changed: %+v, want %+v", after, before)
-		}
+		e.unchanged(t, before)
 	})
 	t.Run("canceled context", func(t *testing.T) {
 		e, _, b := setup(t)
@@ -424,13 +430,13 @@ func TestErrorsKeepState(t *testing.T) {
 		wantErr(t, err, context.Canceled, "tracker: context canceled")
 		e.want(t, got)
 		e.wantCalls(t, "")
-		if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-			t.Errorf("state changed: %+v, want %+v", after, before)
-		}
+		e.unchanged(t, before)
 	})
 }
 
 func TestInconsistentSource(t *testing.T) {
+	// answer replaces the Source's HeaderByHash answer for h; a zero header and nil error pass the
+	// call through to the fake chain.
 	type answer func(e *env, h common.Hash) (chain.Header, error)
 	setup := func(t *testing.T, ans answer) *env {
 		t.Helper()
@@ -503,6 +509,42 @@ func TestInconsistentSource(t *testing.T) {
 			head: func(*env) chain.Header { return chain.Header{} },
 			want: func(*env) string { return "tracker: inconsistent source: zero block hash" },
 		},
+		{
+			name: "zero parent hash",
+			head: func(*env) chain.Header {
+				return chain.Header{Ref: chain.BlockRef{Number: 8, Hash: common.HexToHash("0xf8")}}
+			},
+			want: func(*env) string {
+				return "tracker: inconsistent source: block 8 " + common.HexToHash("0xf8").Hex() + " has a zero parent hash"
+			},
+		},
+		{
+			name: "own hash as parent",
+			head: func(*env) chain.Header {
+				x := common.HexToHash("0xf8")
+				return chain.Header{Ref: chain.BlockRef{Number: 8, Hash: x, Parent: x}}
+			},
+			want: func(*env) string {
+				x := common.HexToHash("0xf8").Hex()
+				return "tracker: inconsistent source: block 8 " + x + " has parent " + x + ", which is block 8 of the same branch"
+			},
+		},
+		{
+			name: "cycle of two",
+			ans: func(e *env, h common.Hash) (chain.Header, error) {
+				if h == common.HexToHash("0xf7") {
+					return chain.Header{Ref: chain.BlockRef{Number: 7, Hash: h, Parent: common.HexToHash("0xf8")}}, nil
+				}
+				return chain.Header{}, nil
+			},
+			head: func(*env) chain.Header {
+				return chain.Header{Ref: chain.BlockRef{Number: 8, Hash: common.HexToHash("0xf8"), Parent: common.HexToHash("0xf7")}}
+			},
+			want: func(*env) string {
+				return "tracker: inconsistent source: block 7 " + common.HexToHash("0xf7").Hex() + " has parent " +
+					common.HexToHash("0xf8").Hex() + ", which is block 8 of the same branch"
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -511,9 +553,7 @@ func TestInconsistentSource(t *testing.T) {
 			got, err := e.headHeader(t, tt.head(e))
 			wantErr(t, err, tracker.ErrInconsistentSource, tt.want(e))
 			e.want(t, got)
-			if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
-				t.Errorf("state changed: %+v, want %+v", after, before)
-			}
+			e.unchanged(t, before)
 		})
 	}
 }
@@ -521,7 +561,8 @@ func TestInconsistentSource(t *testing.T) {
 func TestFinalizeInWindow(t *testing.T) {
 	e := tracked(t, 6)
 	a := e.refs(1, 6)
-	got := e.mustFinalize(t, a[2])
+	// The caller's ref lacks Parent and Time; the tracker finalizes the window's own ref.
+	got := e.mustFinalize(t, chain.BlockRef{Number: 3, Hash: a[2].Hash})
 	e.want(t, got, e.fin(a[2]))
 	e.wantCalls(t, "")
 	if w := e.tr.State().Window(); !reflect.DeepEqual(w, a[3:]) {
@@ -588,6 +629,23 @@ func TestFinalizeErrorsKeepState(t *testing.T) {
 	}
 }
 
+// TestWindowStartIndex finalizes inside the window without compacting it, then reverts, extends
+// and walks over it.
+func TestWindowStartIndex(t *testing.T) {
+	e := tracked(t, 6)
+	a := e.refs(1, 6)
+	e.want(t, e.mustFinalize(t, a[1]), e.fin(a[1]))
+	e.want(t, e.mustFinalize(t, a[2]), e.fin(a[2]))
+	b6 := e.reorg("B", 1, 1)[0]
+	e.want(t, e.mustHead(t, b6), e.rev(a[4]), e.blk(b6))
+	b7 := e.mine("B", 1)[0]
+	e.want(t, e.mustHead(t, b7), e.blk(b7))
+	b := e.mine("B", 2) // B8, B9
+	e.want(t, e.mustFinalize(t, b[1]), e.blk(b[0]), e.blk(b[1]), e.fin(b[1]))
+	b10 := e.mine("B", 1)[0]
+	e.want(t, e.mustHead(t, b10), e.blk(b10))
+}
+
 func TestFinalizeAboveTip(t *testing.T) {
 	e := tracked(t, 3)
 	oldWindow := e.refs(1, 3)
@@ -613,7 +671,7 @@ func TestFinalizeAboveTip(t *testing.T) {
 
 func TestFinalizeDisagrees(t *testing.T) {
 	e := tracked(t, 6)
-	a3 := e.refs(3, 3)[0]
+	a3 := e.ref(3)
 	oldWindow := e.refs(1, 5)
 	b := e.reorg("B", 3, 3) // B4…B6
 	got := e.mustFinalize(t, b[1])
