@@ -5,6 +5,7 @@ package consumer_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -142,6 +143,37 @@ func offsets(from, to chainlog.Offset) []chainlog.Offset {
 		out = append(out, o)
 	}
 	return out
+}
+
+// trace counts the calls of a trace state's apply and clone functions.
+type trace struct{ applies, clones int }
+
+// newTrace returns a trace and the trace state's functions: apply appends the block's number,
+// clone copies the slice, and both count their calls in the trace.
+func newTrace() (*trace, func([]uint64, chain.Block) []uint64, func([]uint64) []uint64) {
+	tr := &trace{}
+	apply := func(s []uint64, b chain.Block) []uint64 {
+		tr.applies++
+		return append(s, b.Ref.Number)
+	}
+	clone := func(s []uint64) []uint64 {
+		tr.clones++
+		return slices.Clone(s)
+	}
+	return tr, apply, clone
+}
+
+// applyAll applies es to m with consecutive offsets after m's offset and fails the test on an
+// error.
+func applyAll[S any](tb testing.TB, m *consumer.Memory[S], es ...chainlog.Entry) {
+	tb.Helper()
+	for _, e := range es {
+		off, _ := m.Offset(tb.Context())
+		e.Offset = off + 1
+		if err := m.Apply(tb.Context(), e); err != nil {
+			tb.Fatalf("Apply offset %d (%s): %v", e.Offset, e.Kind, err)
+		}
+	}
 }
 
 // bounded returns a context that ends 30 seconds after the test starts it, so a Run that should
