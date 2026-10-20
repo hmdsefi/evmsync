@@ -665,6 +665,56 @@ func TestWindowStartIndex(t *testing.T) {
 	e.want(t, e.mustHead(t, b10), e.blk(b10))
 }
 
+// TestFinalizeInWindowRepeatedly finalizes three window blocks in a row, then checks that every
+// block at or below F is ignored as a lagging head.
+func TestFinalizeInWindowRepeatedly(t *testing.T) {
+	e := tracked(t, 6)
+	a := e.refs(1, 6)
+	for _, f := range a[1:4] {
+		e.want(t, e.mustFinalize(t, f), e.fin(f))
+	}
+	for _, h := range a[:4] {
+		e.want(t, e.mustHead(t, h))
+		e.wantCalls(t, "")
+	}
+}
+
+// TestWalkCheckOrder pins the order of the walk's checks for one block: the finalized height, then
+// the parent hash, then the context.
+func TestWalkCheckOrder(t *testing.T) {
+	x := common.HexToHash("0xf4")
+	t.Run("finalized height first", func(t *testing.T) {
+		e := newEnv(t, tracker.Config{}, fakechain.Faults{}, nil)
+		a3 := e.mine("A", 3)[2]
+		e.mustFinalize(t, a3)
+		for _, parent := range []common.Hash{{}, x} {
+			got, err := e.head(t, chain.BlockRef{Number: 4, Hash: x, Parent: parent})
+			wantErr(t, err, tracker.ErrReorgBelowFinalized, "tracker: reorg below the finalized block: block 4 "+
+				x.Hex()+" does not descend from finalized block 3 "+a3.Hash.Hex())
+			e.want(t, got)
+			e.wantCalls(t, "")
+		}
+	})
+	t.Run("parent hash before the context", func(t *testing.T) {
+		e := tracked(t, 6)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		tests := []struct {
+			parent common.Hash
+			want   string
+		}{
+			{common.Hash{}, "tracker: inconsistent source: block 8 " + x.Hex() + " has a zero parent hash"},
+			{x, "tracker: inconsistent source: block 8 " + x.Hex() + " has parent " + x.Hex() +
+				", which is block 8 of the same branch"},
+		}
+		for _, tt := range tests {
+			got, err := e.tr.Head(ctx, chain.Header{Ref: chain.BlockRef{Number: 8, Hash: x, Parent: tt.parent}})
+			wantErr(t, err, tracker.ErrInconsistentSource, tt.want)
+			e.want(t, got)
+		}
+	})
+}
+
 func TestFinalizeAboveTip(t *testing.T) {
 	e := tracked(t, 3)
 	oldWindow := e.refs(1, 3)
