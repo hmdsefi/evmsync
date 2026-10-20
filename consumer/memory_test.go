@@ -89,6 +89,36 @@ func TestMemoryRevert(t *testing.T) {
 	}
 }
 
+// TestMemoryRevertDropsPending checks that a partial revert drops the blocks above its target:
+// a later revert re-applies only the blocks of the new branch.
+func TestMemoryRevertDropsPending(t *testing.T) {
+	c, a := refs(t, 5)
+	m, tr := newTraceMemory()
+	applyAll(t, m, fin(a[0]), blk(c, a[1]), blk(c, a[2]), blk(c, a[3]), blk(c, a[4]), blk(c, a[5]), rev(a[2]))
+	b := c.Reorg(3, 2) // B3, B4 on A2
+	applyAll(t, m, blk(c, b[0]), blk(c, b[1]), rev(b[0]))
+	check(t, m, tr, []uint64{1, 2, 3}, 5+2+2+3, 3)
+}
+
+// TestMemoryRevertToZeroBase reverts to the zero base while a block numbered 0 is pending.
+func TestMemoryRevertToZeroBase(t *testing.T) {
+	c, a := refs(t, 0)
+	m, tr := newTraceMemory()
+	applyAll(t, m, blk(c, a[0]), rev(chain.BlockRef{}))
+	check(t, m, tr, nil, 1, 1)
+}
+
+// TestMemoryFinalBlockWhilePending applies a final block while blocks are pending, which a log
+// never sends: Memory treats it as non-final.
+func TestMemoryFinalBlockWhilePending(t *testing.T) {
+	c, a := refs(t, 2)
+	m, tr := newTraceMemory()
+	applyAll(t, m, fin(a[0]), blk(c, a[1]), fblk(c, a[2]))
+	check(t, m, tr, []uint64{1, 2}, 2, 1)
+	applyAll(t, m, rev(a[1]))
+	check(t, m, tr, []uint64{1}, 3, 2)
+}
+
 func TestMemoryRevertToBaseWithoutPending(t *testing.T) {
 	_, rs := refs(t, 0)
 	m, tr := newTraceMemory()
@@ -252,6 +282,9 @@ func TestMemoryConcurrentState(t *testing.T) {
 	for i := range 1_000 {
 		s := m.State()
 		s[uint64(n+1+i)] = 0 // the caller owns the result
+		if _, err := m.Offset(ctx); err != nil {
+			t.Errorf("Offset: %v", err)
+		}
 	}
 	if err := <-done; err != context.Canceled {
 		t.Fatalf("Run = %v, want context.Canceled", err)

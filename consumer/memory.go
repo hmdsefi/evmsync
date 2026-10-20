@@ -100,7 +100,8 @@ func (m *Memory[S]) State() S {
 	return m.clone(m.cur)
 }
 
-// block applies b. A final block with nothing pending becomes the base without a snapshot.
+// block applies b. A final block with nothing pending becomes the base without a snapshot; with
+// blocks pending, which a log never sends, it is applied as a non-final block.
 func (m *Memory[S]) block(b chain.Block, final bool) {
 	switch {
 	case m.first == len(m.pending) && final:
@@ -119,13 +120,16 @@ func (m *Memory[S]) block(b chain.Block, final bool) {
 // revertTarget returns the index in the pending blocks of the block with to's number and hash,
 // or -1 when to is the base, and false when it is neither.
 func (m *Memory[S]) revertTarget(to chain.BlockRef) (int, bool) {
+	if to.Number == m.base.Number && to.Hash == m.base.Hash {
+		return -1, true
+	}
 	live := m.pending[m.first:]
 	for i := len(live) - 1; i >= 0 && live[i].Ref.Number >= to.Number; i-- {
 		if live[i].Ref.Number == to.Number {
 			return i, live[i].Ref.Hash == to.Hash
 		}
 	}
-	return -1, to.Number == m.base.Number && to.Hash == m.base.Hash
+	return -1, false
 }
 
 // revert makes the state the one at pending block i, or at the base when i is -1.
