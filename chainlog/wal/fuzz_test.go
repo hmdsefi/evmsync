@@ -5,6 +5,7 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -54,7 +55,11 @@ func FuzzRecover(f *testing.F) {
 		}
 		ends := recordEnds(es[start:end], first)
 
-		var wantHead int // -1: any prefix; -2: ErrCorrupt
+		const (
+			anyPrefix   = -1 // Open may keep any prefix of the entries
+			wantCorrupt = -2 // Open must fail with ErrCorrupt
+		)
+		var wantHead int // the Head Open recovers to, or one of the two above
 		switch {
 		case mode%3 == 0:
 			cut := int64(pos % (size + 1))
@@ -74,16 +79,24 @@ func FuzzRecover(f *testing.F) {
 			if err := os.WriteFile(path, b, 0o600); err != nil { //nolint:gosec // a segment of the test's own directory
 				t.Fatal(err)
 			}
-			wantHead = -1
+			wantHead = anyPrefix
 			recStart := int64(0)
 			for k, recEnd := range ends {
 				if int64(i) < recEnd {
-					switch lastRecord := seg == len(names)-1 && k == len(ends)-1; {
-					case int64(i) < recStart+4: // the length field: no promise beyond the prefix
-					case lastRecord:
+					inLast := seg == len(names)-1
+					if int64(i) < recStart+4 && inLast {
+						// A damaged length field: a torn tail when the declared end is at or past
+						// the end of the file, and corruption otherwise.
+						length := int64(binary.LittleEndian.Uint32(b[recStart:]))
+						if recStart+8+length >= int64(size) {
+							wantHead = start + k
+						} else {
+							wantHead = wantCorrupt
+						}
+					} else if inLast && k == len(ends)-1 {
 						wantHead = len(es) - 1
-					default:
-						wantHead = -2
+					} else {
+						wantHead = wantCorrupt
 					}
 					break
 				}
@@ -111,7 +124,7 @@ func FuzzRecover(f *testing.F) {
 		if fi.Size() != active.size {
 			t.Fatalf("active segment holds %d bytes on disk, the log counts %d", fi.Size(), active.size)
 		}
-		if wantHead == -2 {
+		if wantHead == wantCorrupt {
 			t.Fatal("Open succeeded on a damaged record that is not the last one, want ErrCorrupt")
 		}
 		head, _ := l.Head(t.Context())

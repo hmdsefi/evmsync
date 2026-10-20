@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/chainlog"
@@ -199,6 +199,28 @@ func TestTornVersusCorrupt(t *testing.T) {
 		{"flipped body byte in the last record of a sealed segment", func(dir string) {
 			rewrite(t, dir, names[0], func(b []byte) []byte { b[sealedLast+20] ^= 1; return b })
 		}, 0, "segment " + names[0] + " position " + strconv.FormatInt(sealedLast, 10) + ": "},
+		{"zeros, then one byte past the first 64 KiB", func(dir string) {
+			rewrite(t, dir, last, func(b []byte) []byte {
+				tail := make([]byte, 70<<10)
+				tail[66_000] = 1
+				return append(b, tail...)
+			})
+		}, 0, "segment " + last + " position " + strconv.FormatInt(ends[len(ends)-1], 10) + ": "},
+		{"a zero header, then a record", func(dir string) {
+			rewrite(t, dir, last, func(b []byte) []byte { return append(append(b, make([]byte, 8)...), reencoded...) })
+		}, 0, "segment " + last + " position " + strconv.FormatInt(ends[len(ends)-1], 10) + ": "},
+		{"a damaged last record, then one byte", func(dir string) {
+			rewrite(t, dir, last, func(b []byte) []byte { b[lastStart+20] ^= 1; return append(b, 0x01) })
+		}, 0, "segment " + last + " position " + strconv.FormatInt(lastStart, 10) + ": "},
+		{"a cut below the checkpoint", func(dir string) {
+			// The checkpoint covers every record; a length flip in the active segment's first
+			// record would cut them. Open must refuse before it cuts.
+			b, _ := os.ReadFile(filepath.Join(dir, checkpointName))
+			cp, _ := decodeCheckpoint(b, 0)
+			cp.x = 30
+			rewrite(t, dir, checkpointName, func([]byte) []byte { return encodeCheckpoint(cp) })
+			rewrite(t, dir, last, func(b []byte) []byte { b[3] ^= 0x80; return b })
+		}, 0, "checkpoint at 30 outside ["},
 		{"flipped byte in the first segment", func(dir string) {
 			rewrite(t, dir, names[0], func(b []byte) []byte { b[20] ^= 1; return b })
 		}, 0, "segment " + names[0] + " position 0: "},
@@ -246,20 +268,80 @@ func TestTornVersusCorrupt(t *testing.T) {
 	}
 }
 
-// TestRecoverSync cuts a torn tail with SyncAlways: Open fsyncs the cut segment.
+// TestRecoverSync cuts a torn tail with SyncAlways: Open fsyncs the cut segment after the cut,
+// and a failed fsync fails Open with the I/O error.
 func TestRecoverSync(t *testing.T) {
-	dir, _ := thirtyBlocks(t)
-	names := segmentNames(t, dir)
-	last := names[len(names)-1]
-	rewrite(t, dir, last, func(b []byte) []byte { return append(b, make([]byte, 100)...) })
-	rec := &syncRecorder{}
-	opts := recoveryOpts(1024)
-	opts.Sync = SyncAlways
-	l := openLog(t, dir, opts, hooks{sync: rec.sync})
-	if h, _ := l.Head(t.Context()); h != 30 {
-		t.Errorf("Head = %d, want 30", h)
+	for _, fail := range []bool{false, true} {
+		t.Run("fsync fails "+strconv.FormatBool(fail), func(t *testing.T) {
+			dir, _ := thirtyBlocks(t)
+			names := segmentNames(t, dir)
+			last := names[len(names)-1]
+			path := filepath.Join(dir, last)
+			fi, _ := os.Stat(path)
+			cutAt := fi.Size()
+			rewrite(t, dir, last, func(b []byte) []byte { return append(b, make([]byte, 100)...) })
+			synced := false
+			h := hooks{sync: func(name string) error {
+				if name != path {
+					return nil
+				}
+				synced = true
+				if fi, err := os.Stat(path); err != nil || fi.Size() != cutAt {
+					t.Errorf("fsync of the segment before the cut: %d bytes, want %d", fi.Size(), cutAt)
+				}
+				if fail {
+					return syscall.EIO
+				}
+				return nil
+			}}
+			opts := recoveryOpts(1024)
+			opts.Sync = SyncAlways
+			l, err := openWithHooks(dir, opts, h)
+			if fail {
+				if err == nil {
+					_ = l.Close()
+				}
+				if !errors.Is(err, syscall.EIO) || errors.Is(err, ErrCorrupt) {
+					t.Errorf("Open with a failing fsync = %v, want EIO and not ErrCorrupt", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer l.Close()
+			if !synced {
+				t.Error("Open did not fsync the cut segment")
+			}
+			if hd, _ := l.Head(t.Context()); hd != 30 {
+				t.Errorf("Head = %d, want 30", hd)
+			}
+		})
 	}
-	if got := rec.take(); !slices.Contains(got, last) {
-		t.Errorf("fsyncs during Open = %v, want one of the cut segment %s", got, last)
+}
+
+// TestRecoverOneSegment cuts a torn tail in a log that never rolled.
+func TestRecoverOneSegment(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(dir, recoveryOpts(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := linkedBlocks(1, 2, 40)
+	for _, e := range es {
+		mustAppend(t, l, e)
+	}
+	mustClose(t, l)
+	if err := os.Truncate(filepath.Join(dir, firstSegment), 300); err != nil {
+		t.Fatal(err)
+	}
+	l, rec, err := reopen(t, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+	wantEntries(t, l, es, 1)
+	if _, warned := rec.find(slog.LevelWarn, "wal torn tail cut"); !warned {
+		t.Error("no torn tail warning")
 	}
 }
