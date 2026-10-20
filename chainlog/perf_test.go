@@ -22,6 +22,7 @@ func TestPerf(t *testing.T) {
 		{"Encode", BenchmarkEncode, time.Microsecond, 0},
 		{"Decode", BenchmarkDecode, 2 * time.Microsecond, 3},
 		{"StateBlock", BenchmarkStateBlock, 300 * time.Nanosecond, 0},
+		{"MemoryAppend", BenchmarkMemoryAppend, 5 * time.Microsecond, -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
