@@ -59,3 +59,37 @@ func BenchmarkStateBlock(b *testing.B) {
 		next++
 	}
 }
+
+// BenchmarkMemoryAppend appends one block of 10 logs (3 topics, 64 bytes of data) and a Finalize
+// of the window's first ref per iteration, so the window keeps 50,000 refs. ns/op covers both
+// appends, so it can only overstate the cost of the block.
+func BenchmarkMemoryAppend(b *testing.B) {
+	const window = 50_000
+	ctx := b.Context()
+	m := NewMemory(Meta{}, 0)
+	if _, err := m.Append(ctx, blocks(1, window)...); err != nil {
+		b.Fatal(err)
+	}
+	next := uint64(window + 1)
+	logs := mkLogs(blk(next, 0), 10, 3, 64) // Append copies them, so each block reuses them
+	b.ReportAllocs()
+	for b.Loop() {
+		ref := blk(next, 0)
+		for i := range logs {
+			logs[i].BlockNumber, logs[i].BlockHash = ref.Number, ref.Hash
+		}
+		e := Entry{Kind: KindBlock, Block: chain.Block{Ref: ref, Logs: logs}}
+		if _, err := m.Append(ctx, e); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := m.Append(ctx, finalize(blk(next-window, 0))); err != nil {
+			b.Fatal(err)
+		}
+		if next%1024 == 0 {
+			if err := m.Truncate(ctx, m.head); err != nil { // bound the benchmark's memory
+				b.Fatal(err)
+			}
+		}
+		next++
+	}
+}
