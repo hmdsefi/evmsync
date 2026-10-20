@@ -59,8 +59,9 @@ type Log struct {
 	// appendMu serializes Append, Truncate and Close. Their writes to the fields below happen
 	// with mu held as well, so a holder of appendMu may read them without mu.
 	appendMu sync.Mutex
-	buf      []byte  // Append's encode buffer; guarded by appendMu
-	starts   []int64 // the position of each record in buf; guarded by appendMu
+	buf      []byte   // Append's encode buffer; guarded by appendMu
+	undelete []string // dropped segment files a failed deletion left, oldest first; guarded by appendMu
+	starts   []int64  // the position of each record in buf; guarded by appendMu
 
 	mu           sync.RWMutex
 	segs         []*segment      // in offset order; the last is active; guarded by mu
@@ -400,7 +401,9 @@ func (l *Log) State(ctx context.Context) (chainlog.State, error) {
 }
 
 // Truncate drops whole segments whose entries are all below min(before, L+1), where L is the
-// offset of the newest Finalize entry (0 if none). It keeps the active segment.
+// offset of the newest Finalize entry (0 if none), and deletes their files. It keeps the active
+// segment. A Read of a dropped range returns the entries or an error wrapping
+// chainlog.ErrTruncated.
 func (l *Log) Truncate(ctx context.Context, before chainlog.Offset) error {
 	l.appendMu.Lock()
 	defer l.appendMu.Unlock()
@@ -412,10 +415,18 @@ func (l *Log) Truncate(ctx context.Context, before chainlog.Offset) error {
 	b := min(before, l.lastFin+1)
 	oldest := l.oldest
 	l.mu.RUnlock()
-	if err != nil || b <= oldest {
+	if err != nil {
 		return err
 	}
-	return nil
+	// Files a failed deletion left go first: deleting a later segment before them would leave a
+	// gap that Open rejects.
+	if err := l.removeSegments(); err != nil {
+		return err
+	}
+	if b <= oldest {
+		return nil
+	}
+	return l.compact(b)
 }
 
 // Close closes every file, which releases the directory's lock, and wakes every Wait with
