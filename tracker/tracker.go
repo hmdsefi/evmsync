@@ -126,11 +126,6 @@ func (t *Tracker) known(h common.Hash) (chain.BlockRef, bool) {
 	if h == t.fin.Hash && t.anchored() {
 		return t.fin, true
 	}
-	return t.inWindow(h)
-}
-
-// inWindow returns the window ref with hash h.
-func (t *Tracker) inWindow(h common.Hash) (chain.BlockRef, bool) {
 	n, ok := t.byHash[h]
 	if !ok {
 		return chain.BlockRef{}, false
