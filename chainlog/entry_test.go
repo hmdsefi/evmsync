@@ -42,9 +42,11 @@ func TestKindString(t *testing.T) {
 		{Kind(255), "Kind(255)"},
 	}
 	for _, tt := range tests {
-		if got := tt.kind.String(); got != tt.want {
-			t.Errorf("Kind(%d).String() = %q, want %q", uint8(tt.kind), got, tt.want)
-		}
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.kind.String(); got != tt.want {
+				t.Errorf("Kind(%d).String() = %q, want %q", uint8(tt.kind), got, tt.want)
+			}
+		})
 	}
 }
 
@@ -56,11 +58,12 @@ func TestIDString(t *testing.T) {
 	if !(ID{}).IsZero() {
 		t.Error("ID{}.IsZero() = false, want true")
 	}
-	if (ID{15: 1}).IsZero() {
-		t.Error("ID{15: 1}.IsZero() = true, want false")
-	}
-	if (ID{0: 1}).IsZero() {
-		t.Error("ID{0: 1}.IsZero() = true, want false")
+	for i := range len(ID{}) {
+		var id ID
+		id[i] = 1
+		if id.IsZero() {
+			t.Errorf("ID{%d: 1}.IsZero() = true, want false", i)
+		}
 	}
 }
 
@@ -92,8 +95,10 @@ func TestErrorTexts(t *testing.T) {
 		{ErrTrailing, "chainlog: trailing bytes in record"},
 	}
 	for _, tt := range tests {
-		if got := tt.err.Error(); got != tt.want {
-			t.Errorf("error text = %q, want %q", got, tt.want)
-		}
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.err.Error(); got != tt.want {
+				t.Errorf("error text = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

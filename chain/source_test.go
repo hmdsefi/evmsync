@@ -9,23 +9,26 @@ import (
 )
 
 func TestErrors(t *testing.T) {
-	sentinels := []struct {
+	tests := []struct {
+		name string
 		err  error
 		want string
 	}{
-		{ErrNotFound, "chain: not found"},
-		{ErrUnsupported, "chain: unsupported"},
-		{ErrInvalidRange, "chain: invalid block range"},
-		{ErrInvalidFilter, "chain: invalid filter"},
+		{"ErrNotFound", ErrNotFound, "chain: not found"},
+		{"ErrUnsupported", ErrUnsupported, "chain: unsupported"},
+		{"ErrInvalidRange", ErrInvalidRange, "chain: invalid block range"},
+		{"ErrInvalidFilter", ErrInvalidFilter, "chain: invalid filter"},
 	}
-	for i, s := range sentinels {
-		if s.err.Error() != s.want {
-			t.Errorf("sentinel %d: Error() = %q, want %q", i, s.err.Error(), s.want)
-		}
-		for j, o := range sentinels {
-			if i != j && errors.Is(s.err, o.err) {
-				t.Errorf("errors.Is(%q, %q) = true, want false", s.want, o.want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.err.Error() != tt.want {
+				t.Errorf("Error() = %q, want %q", tt.err.Error(), tt.want)
 			}
-		}
+			for _, o := range tests {
+				if o.name != tt.name && errors.Is(tt.err, o.err) {
+					t.Errorf("errors.Is(%s, %s) = true, want false", tt.name, o.name)
+				}
+			}
+		})
 	}
 }

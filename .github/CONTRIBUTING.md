@@ -32,7 +32,9 @@ or `RESULT RED` (exit 1). Three environment variables change what it runs:
 | `GATE_LOGS` | `tmp/gate` under the repository root | Directory for each step's log, `<go version>-<step>.log` |
 | `GATE_LINT` | `golangci-lint` | The golangci-lint binary; the gate checks that it is v2.14.0 |
 
-CI runs these checks on Linux and macOS with Go 1.26 and 1.27.
+CI runs golangci-lint, a build with `CGO_ENABLED=0` on the latest Go release, and the tests with the
+race detector on the Go version in `go.mod`. It fails when total test coverage drops below 95%, the
+threshold in `.testcoverage.yml`.
 
 ## Repository layout
 

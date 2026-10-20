@@ -12,12 +12,11 @@ import (
 )
 
 func BenchmarkFilterMatch(b *testing.B) {
-	t2a, t2b := topA, topB
 	f := Filter{
 		Addresses: []common.Address{usdc},
-		Topics:    [][]common.Hash{{transfer}, nil, {t2a, t2b}},
+		Topics:    [][]common.Hash{{transfer}, nil, {topA, topB}},
 	}
-	l := Log{Address: usdc, Topics: []common.Hash{transfer, topX, t2b}}
+	l := Log{Address: usdc, Topics: []common.Hash{transfer, topX, topB}}
 	if !f.Match(l) {
 		b.Fatal("benchmark log does not match")
 	}
@@ -59,7 +58,9 @@ func BenchmarkBloomOf(b *testing.B) {
 }
 
 func TestPerf(t *testing.T) {
-	assert := os.Getenv("EVMSYNC_PERF") == "1" && !raceEnabled
+	if os.Getenv("EVMSYNC_PERF") != "1" || raceEnabled {
+		t.Skip("set EVMSYNC_PERF=1 and run without -race to measure the targets")
+	}
 	tests := []struct {
 		name      string
 		bench     func(*testing.B)
@@ -78,9 +79,6 @@ func TestPerf(t *testing.T) {
 				t.Fatal("benchmark did not run")
 			}
 			t.Logf("%d ns/op, %d allocs/op", r.NsPerOp(), r.AllocsPerOp())
-			if !assert {
-				return
-			}
 			if got := time.Duration(r.NsPerOp()); got > tt.maxTime {
 				t.Errorf("%v/op, want at most %v", got, tt.maxTime)
 			}

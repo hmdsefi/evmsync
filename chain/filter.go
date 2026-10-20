@@ -21,7 +21,7 @@ const MaxFilterValues = 1000
 // Filter selects logs with eth_getLogs semantics. A nil or empty Addresses matches every address.
 // Topics[i] constrains topic i: a nil or empty Topics[i] matches any topic, otherwise the log's
 // topic i must equal one of the listed hashes. A log with fewer topics than len(Topics) never
-// matches, even when the extra positions are wildcards.
+// matches, even when the extra positions are wildcards. Match and Validate only read f.
 type Filter struct {
 	Addresses []common.Address
 	Topics    [][]common.Hash

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"math/rand/v2"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -68,7 +69,14 @@ func TestBloomVectors(t *testing.T) {
 	if got := nonZero(b); !reflect.DeepEqual(got, want) {
 		t.Errorf("BloomOf non-zero bytes = %v, want %v", got, want)
 	}
-	tests2 := []struct {
+	if BloomOf(nil) != (Bloom{}) {
+		t.Error("BloomOf(nil) is not the zero bloom")
+	}
+}
+
+func TestBloomOfTest(t *testing.T) {
+	b := bloomVector()
+	tests := []struct {
 		name string
 		data []byte
 		want bool
@@ -78,13 +86,12 @@ func TestBloomVectors(t *testing.T) {
 		{"one32", one32[:], true},
 		{"zero32", zero32[:], false},
 	}
-	for _, tt := range tests2 {
-		if got := b.Test(tt.data); got != tt.want {
-			t.Errorf("BloomOf(...).Test(%s) = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-	if BloomOf(nil) != (Bloom{}) {
-		t.Error("BloomOf(nil) is not the zero bloom")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := b.Test(tt.data); got != tt.want {
+				t.Errorf("Test = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -115,6 +122,13 @@ func TestMayContain(t *testing.T) {
 		{"topic", b, Filter{Topics: [][]common.Hash{{transfer}}}, true},
 		{"topic in position 1", b, Filter{Topics: [][]common.Hash{nil, {one32}}}, true},
 		{"absent topic", b, Filter{Topics: [][]common.Hash{{zero32}}}, false},
+		{"absent topic in position 1", b, Filter{Topics: [][]common.Hash{nil, {zero32}}}, false},
+		{
+			"two absent addresses",
+			b,
+			Filter{Addresses: []common.Address{other, other2}},
+			false,
+		},
 		{"absent or present topic", b, Filter{Topics: [][]common.Hash{{zero32, transfer}}}, true},
 		{"four wildcards", b, Filter{Topics: [][]common.Hash{nil, nil, nil, nil}}, true},
 		{
@@ -139,12 +153,70 @@ func TestIsZero(t *testing.T) {
 	if !(Bloom{}).IsZero() {
 		t.Error("Bloom{}.IsZero() = false, want true")
 	}
-	for _, i := range []int{0, 255} {
+	for i := range len(Bloom{}) {
 		var b Bloom
 		b[i] = 1
 		if b.IsZero() {
 			t.Errorf("bloom with byte %d set: IsZero() = true, want false", i)
 		}
+	}
+}
+
+func TestBloomAllocs(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector makes sync.Pool drop items")
+	}
+	b := bloomVector()
+	logs := []Log{{Address: usdc, Topics: []common.Hash{transfer}}}
+	f := Filter{Addresses: []common.Address{usdc}, Topics: [][]common.Hash{{transfer}}}
+	tests := []struct {
+		name string
+		fn   func()
+	}{
+		{"Add", func() {
+			var nb Bloom
+			nb.Add(logs[0].Address[:])
+		}},
+		{"Test", func() { b.Test(logs[0].Topics[0][:]) }},
+		{"MayContain", func() { b.MayContain(f) }},
+		{"BloomOf", func() { BloomOf(logs) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if allocs := testing.AllocsPerRun(100, tt.fn); allocs != 0 {
+				t.Errorf("%v allocs per call, want 0", allocs)
+			}
+		})
+	}
+}
+
+func TestBloomConcurrent(t *testing.T) {
+	logs := []Log{{Address: usdc, Topics: []common.Hash{transfer, one32}}}
+	want := bloomVector()
+	errs := make(chan string, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 500 {
+				b := BloomOf(logs)
+				switch {
+				case b != want:
+					errs <- "BloomOf differs from the sequential result"
+					return
+				case !b.Test(usdc[:]):
+					errs <- "Test(usdc) = false, want true"
+					return
+				case b.Test(zero32[:]):
+					errs <- "Test(zero32) = true, want false"
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }
 

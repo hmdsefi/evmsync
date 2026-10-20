@@ -238,6 +238,13 @@ func TestDecodeErrors(t *testing.T) {
 	minLog := cat(rep(0xaa, 20), []byte{0x00, 0x00}, rep(0xbb, 32), []byte{0x00})
 	fb, _ := finalBlock()
 	fbBody := Encode(nil, fb)[8:]
+	shortFlipped := record([]byte{0x01, 0x02})
+	shortFlipped[4] ^= 0xff
+	shortStored := binary.LittleEndian.Uint32(shortFlipped[4:8])
+	shortComputed := crc32.Checksum([]byte{0x01, 0x02}, crc32.MakeTable(crc32.Castagnoli))
+	versionAndKind := bytes.Clone(rb)
+	versionAndKind[0], versionAndKind[1] = 2, 4
+	log0data100 := cat(rep(0xaa, 20), []byte{0x00}, uv(100), rep(0x01, 100), rep(0xbb, 32), []byte{0x00, 0x00})
 
 	tests := []struct {
 		name   string
@@ -286,6 +293,16 @@ func TestDecodeErrors(t *testing.T) {
 		{"tx index 2^32", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x00, 0x00}, rep(0xbb, 32), uv(1<<32), []byte{0x00})), ErrPayload, "log 0: tx index 4294967296 exceeds 4294967295"},
 		{"index 2^32", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x00, 0x00}, rep(0xbb, 32), []byte{0x00}, uv(1<<32))), ErrPayload, "log 0: index 4294967296 exceeds 4294967295"},
 		{"index cut", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x00, 0x05}, rep(0x01, 5), rep(0xbb, 32), []byte{0x00, 0x80})), ErrPayload, "log[0].index: truncated"},
+		// Two faults: the one earlier in the layout is reported.
+		{"checksum before body length", shortFlipped, ErrChecksum, fmt.Sprintf("stored 0x%08x, computed 0x%08x", shortStored, shortComputed)},
+		{"version before kind", record(versionAndKind), ErrVersion, "2"},
+		{"offset 0 before a cut ref", record([]byte{0x01, 0x02, 0x00}), ErrPayload, "offset is 0"},
+		{"flags before nlogs", record(cat(blockHead, []byte{0x02})), ErrPayload, "flags 0x02 has unknown bits"},
+		{"ntopics bound before topics", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x05}, make([]byte, 40))), ErrPayload, "log 0: 5 topics, at most 4"},
+		{"tx index bound before index", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x00, 0x00}, rep(0xbb, 32), uv(1<<32))), ErrPayload, "log 0: tx index 4294967296 exceeds 4294967295"},
+		{"data length equals the rest", record(cat(blockHead, []byte{0x00, 0x01}, rep(0xaa, 20), []byte{0x00}, uv(40), make([]byte, 40))), ErrPayload, "log[0].txhash: truncated"},
+		{"log 1 address cut", record(cat(blockHead, []byte{0x00, 0x02}, log0data100, rep(0xaa, 10))), ErrPayload, "log[1].address: truncated"},
+		{"log 1 ntopics cut", record(cat(blockHead, []byte{0x00, 0x02}, log0data100, rep(0xaa, 20))), ErrPayload, "log[1].ntopics: truncated"},
 		{"log 1 txhash cut", record(cat(
 			blockHead, []byte{0x00, 0x02},
 			rep(0xaa, 20), []byte{0x00}, uv(60), rep(0x01, 60), rep(0xbb, 32), []byte{0x00, 0x00},

@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	other = common.HexToAddress("0x01")
-	topA  = common.HexToHash("0xaa")
-	topB  = common.HexToHash("0xbb")
-	topX  = common.HexToHash("0xcc")
+	other  = common.HexToAddress("0x01")
+	other2 = common.HexToAddress("0x02")
+	topA   = common.HexToHash("0xaa")
+	topB   = common.HexToHash("0xbb")
+	topX   = common.HexToHash("0xcc")
 )
 
 func cloneFilter(f Filter) Filter {
@@ -73,6 +74,7 @@ func TestFilterMatch(t *testing.T) {
 			true, false,
 		},
 		{"five wildcards", Filter{Topics: [][]common.Hash{nil, nil, nil, nil, nil}}, false, false},
+		{"two other addresses", Filter{Addresses: []common.Address{other, other2}}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,6 +94,25 @@ func TestFilterMatch(t *testing.T) {
 			}
 			if !reflect.DeepEqual(full, lc) {
 				t.Error("Match modified the log")
+			}
+		})
+	}
+}
+
+func TestFilterMatchFourthTopic(t *testing.T) {
+	l := Log{Address: usdc, Topics: []common.Hash{transfer, topA, topB, topX}}
+	tests := []struct {
+		name string
+		f    Filter
+		want bool
+	}{
+		{"topic 3 listed", Filter{Topics: [][]common.Hash{nil, nil, nil, {topX}}}, true},
+		{"topic 3 not listed", Filter{Topics: [][]common.Hash{nil, nil, nil, {topA}}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.Match(l); got != tt.want {
+				t.Errorf("Match = %v, want %v", got, tt.want)
 			}
 		})
 	}

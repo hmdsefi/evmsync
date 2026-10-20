@@ -10,7 +10,9 @@ import (
 )
 
 func TestPerf(t *testing.T) {
-	assert := os.Getenv("EVMSYNC_PERF") == "1" && !raceEnabled
+	if os.Getenv("EVMSYNC_PERF") != "1" || raceEnabled {
+		t.Skip("set EVMSYNC_PERF=1 and run without -race to measure the targets")
+	}
 	tests := []struct {
 		name      string
 		bench     func(*testing.B)
@@ -27,9 +29,6 @@ func TestPerf(t *testing.T) {
 				t.Fatal("benchmark did not run")
 			}
 			t.Logf("%d ns/op, %d allocs/op", r.NsPerOp(), r.AllocsPerOp())
-			if !assert {
-				return
-			}
 			if got := time.Duration(r.NsPerOp()); got > tt.maxTime {
 				t.Errorf("%v/op, want at most %v", got, tt.maxTime)
 			}
