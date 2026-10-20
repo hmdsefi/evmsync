@@ -1,0 +1,4 @@
+clock.go:6:11: AP1: wall-clock time: time.Now is forbidden in apply-path code; read time from the block
+clock.go:7:11: AP1: wall-clock time: time.Since is forbidden in apply-path code; read time from the block
+clock.go:8:12: AP1: wall-clock time: time.Sleep is forbidden in apply-path code; read time from the block
+clock.go:10:11: AP1: wall-clock time: time.NewTimer is forbidden in apply-path code; read time from the block
