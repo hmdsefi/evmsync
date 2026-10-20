@@ -233,7 +233,7 @@ func (l *Log) write(head chainlog.Offset, b []byte) error {
 	}
 	s := l.segs[len(l.segs)-1]
 	if _, err := l.hooks.writeTo(s.f, b); err != nil {
-		return err
+		return ioErr("write", s.f.Name(), err)
 	}
 	if l.sync {
 		if err := s.f.Sync(); err != nil {
@@ -428,11 +428,11 @@ func (l *Log) closeFiles() error {
 	var errs []error
 	for _, s := range l.segs {
 		if err := s.f.Close(); err != nil {
-			errs = append(errs, ioErr("write", s.f.Name(), err))
+			errs = append(errs, ioErr("close", s.f.Name(), err))
 		}
 	}
 	if err := l.lock.Close(); err != nil {
-		errs = append(errs, ioErr("write", l.lock.Name(), err))
+		errs = append(errs, ioErr("close", l.lock.Name(), err))
 	}
 	return errors.Join(errs...)
 }

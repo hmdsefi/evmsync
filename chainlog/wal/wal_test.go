@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -256,6 +257,9 @@ func TestPersistence(t *testing.T) {
 	}
 	before := snap(t, l)
 	meta, _ := l.Meta(ctx)
+	if l.lastFin != 48 {
+		t.Errorf("last finalize offset = %d, want 48", l.lastFin)
+	}
 	mustClose(t, l)
 
 	mem := chainlog.NewMemory(opts.Meta, 0)
@@ -268,6 +272,9 @@ func TestPersistence(t *testing.T) {
 
 	l = openLog(t, dir, opts, hooks{})
 	wantSame(t, "WAL after reopen", snap(t, l), before)
+	if l.lastFin != 48 {
+		t.Errorf("last finalize offset after reopen = %d, want 48", l.lastFin)
+	}
 	m, _ := l.Meta(ctx)
 	wantSame(t, "Meta after reopen", m, meta)
 	if off := mustAppend(t, l, linkedBlocks(43, 1, 16)...); off != 51 {
@@ -366,6 +373,10 @@ func TestCheckpointOpen(t *testing.T) {
 	badState[0] = 2
 	names := segmentNames(t, base)
 	f1, _ := parseSegmentName(names[1])
+	f2, _ := parseSegmentName(names[2])
+	if cp.x != f2-1 {
+		t.Fatalf("test setup: checkpoint at %d, want %d", cp.x, f2-1)
+	}
 
 	tests := []struct {
 		name   string
@@ -386,6 +397,10 @@ func TestCheckpointOpen(t *testing.T) {
 		{"bad state", func(dir string) { damageCheckpoint(t, dir, reencode(uint64(cp.x), 0, badState)) }, "checkpoint: chainlog: bad state encoding: version 2"},
 		{"x above head", func(dir string) { damageCheckpoint(t, dir, reencode(uint64(head)+5, 0, stateBin)) },
 			"checkpoint at " + strconv.FormatUint(uint64(head)+5, 10) + " outside [0, " + strconv.FormatUint(uint64(head), 10) + "]"},
+		{"x below the first segment", func(dir string) {
+			_ = os.Remove(filepath.Join(dir, names[0]))
+			damageCheckpoint(t, dir, reencode(uint64(f1)-2, 0, stateBin))
+		}, "checkpoint at " + strconv.FormatUint(uint64(f1)-2, 10) + " outside [" + strconv.FormatUint(uint64(f1)-1, 10) + ", " + strconv.FormatUint(uint64(head), 10) + "]"},
 		{"no checkpoint, first segment not 1", func(dir string) {
 			_ = os.Remove(filepath.Join(dir, checkpointName))
 			_ = os.Remove(filepath.Join(dir, names[0]))
@@ -397,6 +412,25 @@ func TestCheckpointOpen(t *testing.T) {
 			tt.damage(dir)
 			openCorrupt(t, dir, "wal: corrupt log: "+tt.text)
 		})
+	}
+
+	// A checkpoint right before the first segment, as compaction leaves it, opens.
+	dir := copyDir(t, base)
+	_ = os.Remove(filepath.Join(dir, names[0]))
+	_ = os.Remove(filepath.Join(dir, names[1]))
+	l = openLog(t, dir, testOpts(512), hooks{})
+	if o, _ := l.Oldest(t.Context()); o != f2 {
+		t.Errorf("Oldest = %d, want %d", o, f2)
+	}
+	if h, _ := l.Head(t.Context()); h != head {
+		t.Errorf("Head = %d, want %d", h, head)
+	}
+
+	// A bad checkpoint state also wraps chainlog.ErrBadState.
+	dir = copyDir(t, base)
+	damageCheckpoint(t, dir, reencode(uint64(cp.x), 0, badState))
+	if _, err := Open(dir, testOpts(512)); !errors.Is(err, chainlog.ErrBadState) {
+		t.Errorf("Open with a bad checkpoint state = %v, want one wrapping chainlog.ErrBadState", err)
 	}
 }
 
@@ -475,14 +509,15 @@ func TestWriteFailure(t *testing.T) {
 	if !errors.Is(err, ErrFailed) || !errors.Is(err, syscall.EIO) {
 		t.Fatalf("Append with a failing write = %v, want one wrapping ErrFailed and EIO", err)
 	}
-	if got, want := err.Error(), "wal: log failed: append: "+syscall.EIO.Error(); got != want {
+	ioText := "wal: write " + filepath.Join(dir, firstSegment) + ": " + syscall.EIO.Error()
+	if got, want := err.Error(), "wal: log failed: append: "+ioText; got != want {
 		t.Errorf("Append error = %q, want %q", got, want)
 	}
 	if h, _ := l.Head(ctx); h != 3 {
 		t.Errorf("Head = %d after the failed Append, want 3", h)
 	}
 	fail = false // the failure is sticky even when writes would work again
-	earlier := "wal: log failed: earlier error: " + syscall.EIO.Error()
+	earlier := "wal: log failed: earlier error: " + ioText
 	if _, err := l.Append(ctx, linkedBlocks(4, 1, 8)...); err == nil || err.Error() != earlier || !errors.Is(err, ErrFailed) {
 		t.Errorf("next Append = %v, want %q", err, earlier)
 	}
@@ -650,4 +685,157 @@ func TestReadError(t *testing.T) {
 	if err := l.readError(5, ioErr); err != chainlog.ErrClosed { // unwrapped by contract
 		t.Errorf("readError of a closed log = %v, want ErrClosed", err)
 	}
+}
+
+// TestLastFinalizeOffset follows the offset of the newest Finalize, the bound Truncate never
+// crosses, through Append, the checkpoint and the replay on Open.
+func TestLastFinalizeOffset(t *testing.T) {
+	ctx := t.Context()
+	opts := testOpts(512)
+	opts.WindowCap = 0
+	dir := t.TempDir()
+	l := openLog(t, dir, opts, hooks{})
+	mustAppend(t, l, linkedBlocks(1, 3, 100)...)
+	f1 := mustAppend(t, l, finalizeTo(ref(3)))
+	for n := uint64(4); len(segmentNames(t, dir)) < 3; n++ {
+		mustAppend(t, l, linkedBlocks(n, 1, 100)...)
+	}
+	head, _ := l.Head(ctx)
+	if l.lastFin != f1 {
+		t.Errorf("last finalize offset after Append = %d, want %d", l.lastFin, f1)
+	}
+	mustClose(t, l)
+	b, _ := os.ReadFile(filepath.Join(dir, checkpointName))
+	cp, err := decodeCheckpoint(b, 0)
+	if err != nil || cp.l != f1 || cp.x <= f1 {
+		t.Fatalf("checkpoint = x %d, l %d, %v; want l %d below x", cp.x, cp.l, err, f1)
+	}
+
+	// No Finalize after the checkpoint: L comes from the checkpoint.
+	l = openLog(t, dir, opts, hooks{})
+	if l.lastFin != f1 {
+		t.Errorf("last finalize offset after reopen = %d, want %d from the checkpoint", l.lastFin, f1)
+	}
+	// A Finalize after the checkpoint: L comes from the replay.
+	f2 := mustAppend(t, l, finalizeTo(ref(uint64(head))))
+	mustClose(t, l)
+	l = openLog(t, dir, opts, hooks{})
+	if l.lastFin != f2 {
+		t.Errorf("last finalize offset after reopen = %d, want %d from the replay", l.lastFin, f2)
+	}
+}
+
+// TestReopenIndex reads past the first 256 records of a segment through the index Open builds.
+func TestReopenIndex(t *testing.T) {
+	ctx := t.Context()
+	opts := testOpts(0)
+	opts.WindowCap = 0
+	dir := t.TempDir()
+	es := linkedBlocks(1, 600, 4)
+	l := openLog(t, dir, opts, hooks{})
+	mustAppend(t, l, es...)
+	mustClose(t, l)
+
+	l = openLog(t, dir, opts, hooks{})
+	var pos int64
+	var want []int64
+	for i, e := range es {
+		if i%256 == 0 {
+			want = append(want, pos)
+		}
+		e.Offset = chainlog.Offset(i + 1) //nolint:gosec // i < 600
+		pos += int64(len(chainlog.Encode(nil, e)))
+	}
+	wantSame(t, "index positions of records 1, 257 and 513", l.segs[0].index, want)
+	for _, r := range []struct {
+		from chainlog.Offset
+		max  int
+	}{{256, 1}, {257, 1}, {513, 1}, {250, 400}} {
+		got, err := l.Read(ctx, r.from, r.max)
+		if err != nil {
+			t.Fatalf("Read(%d, %d): %v", r.from, r.max, err)
+		}
+		for i, e := range got {
+			if e.Offset != r.from+chainlog.Offset(i) || e.Block.Ref != es[e.Offset-1].Block.Ref { //nolint:gosec // i < 400
+				t.Fatalf("Read(%d, %d) entry %d is offset %d, block %d", r.from, r.max, i, e.Offset, e.Block.Ref.Number)
+			}
+		}
+	}
+}
+
+// TestRollBoundary fills a segment to exactly SegmentSize: that batch does not roll, the next does.
+func TestRollBoundary(t *testing.T) {
+	es := linkedBlocks(1, 3, 40)
+	var size int64
+	for i, e := range es[:2] {
+		e.Offset = chainlog.Offset(i + 1) //nolint:gosec // i < 2
+		size += int64(len(chainlog.Encode(nil, e)))
+	}
+	dir := t.TempDir()
+	l := openLog(t, dir, testOpts(size), hooks{})
+	mustAppend(t, l, es[0])
+	mustAppend(t, l, es[1])
+	if n := len(segmentNames(t, dir)); n != 1 {
+		t.Errorf("a segment filled to exactly SegmentSize rolled: %d segments", n)
+	}
+	mustAppend(t, l, es[2])
+	if n := len(segmentNames(t, dir)); n != 2 {
+		t.Errorf("one byte over SegmentSize: %d segments, want 2", n)
+	}
+}
+
+func TestMaxWindowCap(t *testing.T) {
+	opts := testOpts(0)
+	opts.WindowCap = MaxWindowCap
+	openLog(t, t.TempDir(), opts, hooks{})
+}
+
+// TestBoundedFileRead opens a log whose meta is followed by 64 MiB: Open reads at most the largest
+// meta and one byte more.
+func TestBoundedFileRead(t *testing.T) {
+	dir := newLog(t, testOpts(0), 1)
+	if err := os.Truncate(filepath.Join(dir, metaName), 64<<20); err != nil {
+		t.Fatal(err)
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := Open(dir, testOpts(0))
+	runtime.ReadMemStats(&after)
+	wantCorrupt(t, err, "wal: corrupt log: meta: trailing bytes")
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
+		t.Errorf("Open allocated %d bytes for a 64 MiB meta, want far less", alloc)
+	}
+}
+
+// TestReadWrongOffset re-seals a record with another offset and a valid CRC under an open log.
+func TestReadWrongOffset(t *testing.T) {
+	dir := t.TempDir()
+	l := openLog(t, dir, testOpts(0), hooks{})
+	es := linkedBlocks(1, 3, 40)
+	mustAppend(t, l, es...)
+	first := es[0]
+	first.Offset = 1
+	rec1 := len(chainlog.Encode(nil, first))
+	second := es[1]
+	second.Offset = 9 // a one-byte varint, like 2
+	f, err := os.OpenFile(filepath.Join(dir, firstSegment), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(chainlog.Encode(nil, second), int64(rec1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	_, err = l.Read(t.Context(), 2, 1)
+	if want := "wal: corrupt log: segment " + firstSegment + " position " + strconv.Itoa(rec1) + ": offset 9, want 2"; err == nil || err.Error() != want || !errors.Is(err, ErrCorrupt) {
+		t.Errorf("Read of a record with the wrong offset = %v, want %q", err, want)
+	}
+}
+
+func TestOpenSegmentZero(t *testing.T) {
+	dir := newLog(t, testOpts(0), 1)
+	if err := os.Rename(filepath.Join(dir, firstSegment), filepath.Join(dir, segmentName(0))); err != nil {
+		t.Fatal(err)
+	}
+	openCorrupt(t, dir, "wal: corrupt log: segment "+segmentName(0)+" does not follow offset 0")
 }
