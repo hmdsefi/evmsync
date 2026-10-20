@@ -113,7 +113,8 @@ func BenchmarkHeadDuplicate(b *testing.B) {
 }
 
 // BenchmarkFinalizeSteady measures Finalize of the oldest window block, one block per call. The
-// tracker is rebuilt with a full window, outside the timer, once the window is empty.
+// tracker is rebuilt with a full window, outside the timer, once the window is empty, so the
+// window shrinks from its full size to zero between rebuilds and compacts along the way.
 func BenchmarkFinalizeSteady(b *testing.B) {
 	for _, window := range []int{1000, 100_000} {
 		b.Run(fmt.Sprintf("window=%d", window), func(b *testing.B) {

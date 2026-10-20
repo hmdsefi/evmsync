@@ -4,9 +4,13 @@
 package tracker_test
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/hmdsefi/evmsync/chain"
 	"github.com/hmdsefi/evmsync/chainlog"
 	"github.com/hmdsefi/evmsync/internal/fakechain"
 	"github.com/hmdsefi/evmsync/tracker"
@@ -17,6 +21,11 @@ func TestWindowCap(t *testing.T) {
 		e := newEnv(t, tracker.Config{WindowCap: 4}, fakechain.Faults{}, nil)
 		a := e.mine("A", 8)
 		e.want(t, e.mustHead(t, a[3]), e.blks(a[:4]...)...)
+		// State carries the tracker's cap: its window is full too.
+		st := e.tr.State()
+		if err := st.Check(e.blk(a[4])); !errors.Is(err, chainlog.ErrMalformed) {
+			t.Errorf("State().Check(blk(A5)) = %v, want an error wrapping chainlog.ErrMalformed", err)
+		}
 
 		got, err := e.head(t, a[4])
 		wantErr(t, err, tracker.ErrWindowFull,
@@ -79,7 +88,16 @@ func TestNewOverCap(t *testing.T) {
 	e.want(t, got)
 	e.wantCalls(t, "")
 
-	e.want(t, e.mustFinalize(t, a[2]), e.fin(a[2]))
+	// A duplicate head and a head behind the tip are ignored before the cap is checked.
+	sibling := chain.BlockRef{Number: 5, Hash: common.HexToHash("0x05"), Parent: a[3].Hash}
+	for _, h := range []chain.BlockRef{a[5], sibling} {
+		e.want(t, e.mustHead(t, h))
+		e.wantCalls(t, "")
+	}
+
+	// A Finalize inside the window never fails the cap check, even 5 blocks above F with cap 4.
+	e.want(t, e.mustFinalize(t, a[4]), e.fin(a[4]))
+	e.wantCalls(t, "")
 	e.want(t, e.mustHead(t, a[6]), e.blk(a[6]))
 	e.wantCalls(t, "L(A7)")
 }
