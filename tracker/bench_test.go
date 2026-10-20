@@ -54,7 +54,7 @@ func benchChain(n int) ([]chain.BlockRef, *benchSource) {
 	refs := make([]chain.BlockRef, n)
 	src := &benchSource{headers: make(map[common.Hash]chain.Header, n)}
 	for i := range refs {
-		refs[i] = chain.BlockRef{Number: uint64(i), Hash: hash(i)} //nolint:gosec // i >= 0
+		refs[i] = chain.BlockRef{Number: uint64(i), Hash: hash(i)}
 		if i > 0 {
 			refs[i].Parent = refs[i-1].Hash
 		}
@@ -113,7 +113,8 @@ func BenchmarkHeadDuplicate(b *testing.B) {
 }
 
 // BenchmarkFinalizeSteady measures Finalize of the oldest window block, one block per call. The
-// tracker is rebuilt with a full window, outside the timer, once the window is empty.
+// tracker is rebuilt with a full window, outside the timer, once the window is empty, so the
+// window shrinks from its full size to zero between rebuilds and compacts along the way.
 func BenchmarkFinalizeSteady(b *testing.B) {
 	for _, window := range []int{1000, 100_000} {
 		b.Run(fmt.Sprintf("window=%d", window), func(b *testing.B) {
@@ -144,7 +145,7 @@ func BenchmarkFinalizeSteady(b *testing.B) {
 func BenchmarkFillWindow(b *testing.B) {
 	refs, src := benchChain(DefaultWindowCap + 1)
 	ctx := b.Context()
-	var retained int64
+	var retained float64
 	b.ReportAllocs()
 	for b.Loop() {
 		var before, after runtime.MemStats
@@ -162,8 +163,8 @@ func BenchmarkFillWindow(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 		runtime.KeepAlive(tr)
-		retained = int64(after.HeapAlloc) - int64(before.HeapAlloc) //nolint:gosec // heap sizes fit int64
+		retained = float64(after.HeapAlloc) - float64(before.HeapAlloc)
 		b.StartTimer()
 	}
-	b.ReportMetric(float64(retained), "retained-B")
+	b.ReportMetric(retained, "retained-B")
 }

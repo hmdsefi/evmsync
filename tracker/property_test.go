@@ -5,7 +5,9 @@ package tracker_test
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/chain"
@@ -47,8 +49,8 @@ type result struct {
 }
 
 // runSeed drives a tracker over a faulty source for seed: 300 iterations of Step, Head of Latest
-// and Finalize of Finalized. Every result is appended to a log, which must accept it, and the
-// tracker's State must equal the log's after every call.
+// and Finalize of Finalized. Every non-empty result is appended to a log, which must accept it,
+// and after every call, whatever it returned, the tracker's State must equal the log's.
 func runSeed(t *testing.T, seed uint64) propertyRun {
 	t.Helper()
 	ctx := t.Context()
@@ -61,6 +63,7 @@ func runSeed(t *testing.T, seed uint64) propertyRun {
 	})
 	lg := chainlog.NewMemory(c.Meta(flt), tracker.DefaultWindowCap)
 	tr := tracker.New(src, tracker.Config{Filter: flt}, chainlog.NewState(tracker.DefaultWindowCap))
+	logView := viewOf(chainlog.NewState(tracker.DefaultWindowCap))
 	var run propertyRun
 
 	apply := func(step int, what string, got []chainlog.Entry, err error) {
@@ -70,21 +73,21 @@ func runSeed(t *testing.T, seed uint64) propertyRun {
 				t.Fatalf("seed %d step %d: %s: %v", seed, step, what, err)
 			}
 			run.results = append(run.results, result{err: err.Error()})
-			return
+		} else {
+			run.results = append(run.results, result{entries: got})
 		}
-		run.results = append(run.results, result{entries: got})
-		if len(got) == 0 {
-			return
+		if len(got) > 0 {
+			if _, aerr := lg.Append(ctx, got...); aerr != nil {
+				t.Fatalf("seed %d step %d: %s: Append: %v", seed, step, what, aerr)
+			}
+			ls, serr := lg.State(ctx)
+			if serr != nil {
+				t.Fatal(serr)
+			}
+			logView = viewOf(ls)
 		}
-		if _, aerr := lg.Append(ctx, got...); aerr != nil {
-			t.Fatalf("seed %d step %d: %s: Append: %v", seed, step, what, aerr)
-		}
-		ls, serr := lg.State(ctx)
-		if serr != nil {
-			t.Fatal(serr)
-		}
-		if tv, lv := viewOf(tr.State()), viewOf(ls); !reflect.DeepEqual(tv, lv) {
-			t.Fatalf("seed %d step %d: %s: tracker state %+v, log state %+v", seed, step, what, tv, lv)
+		if tv := viewOf(tr.State()); !sameView(tv, logView) {
+			t.Fatalf("seed %d step %d: %s: tracker state %+v, log state %+v", seed, step, what, tv, logView)
 		}
 	}
 
@@ -109,19 +112,53 @@ func runSeed(t *testing.T, seed uint64) propertyRun {
 	return run
 }
 
+// sameView compares two views without reflection, which dominated the property test's run time.
+func sameView(a, b view) bool {
+	return a.Tip == b.Tip && a.Finalized == b.Finalized && slices.Equal(a.Window, b.Window)
+}
+
+// firstDiff returns the first index at which two sequences of lengths na and nb differ, where
+// same(i) compares element i of both, or -1 when they are equal.
+func firstDiff(na, nb int, same func(i int) bool) int {
+	for i := range min(na, nb) {
+		if !same(i) {
+			return i
+		}
+	}
+	if na != nb {
+		return min(na, nb)
+	}
+	return -1
+}
+
+// at returns element i of s formatted with %+v, or "nothing" when s is shorter.
+func at[T any](s []T, i int) string {
+	if i < len(s) {
+		return fmt.Sprintf("%+v", s[i])
+	}
+	return "nothing"
+}
+
 func TestMutualConsistency(t *testing.T) {
 	seeds := uint64(300)
 	if testing.Short() {
 		seeds = 50
 	}
 	for seed := uint64(1); seed <= seeds; seed++ {
-		first := runSeed(t, seed)
-		second := runSeed(t, seed)
-		if !reflect.DeepEqual(first.calls, second.calls) {
-			t.Fatalf("seed %d: the repeated run made different Source calls", seed)
-		}
-		if !reflect.DeepEqual(first.results, second.results) {
-			t.Fatalf("seed %d: the repeated run returned different results", seed)
-		}
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			t.Parallel()
+			first := runSeed(t, seed)
+			second := runSeed(t, seed)
+			if i := firstDiff(len(first.calls), len(second.calls), func(i int) bool {
+				return first.calls[i] == second.calls[i]
+			}); i >= 0 {
+				t.Fatalf("Source call %d differs: first run %s, repeated run %s", i, at(first.calls, i), at(second.calls, i))
+			}
+			if i := firstDiff(len(first.results), len(second.results), func(i int) bool {
+				return reflect.DeepEqual(first.results[i], second.results[i])
+			}); i >= 0 {
+				t.Fatalf("result %d differs: first run %s, repeated run %s", i, at(first.results, i), at(second.results, i))
+			}
+		})
 	}
 }

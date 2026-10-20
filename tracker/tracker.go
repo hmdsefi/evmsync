@@ -135,12 +135,11 @@ func (t *Tracker) known(h common.Hash) (chain.BlockRef, bool) {
 
 // cut drops the window refs above number n.
 func (t *Tracker) cut(n uint64) {
-	w := t.window()
-	keep := n - t.fin.Number
-	for _, r := range w[keep:] {
+	dropped := t.window()[n-t.fin.Number:]
+	for _, r := range dropped {
 		delete(t.byHash, r.Hash)
 	}
-	t.win = t.win[:t.start+int(keep)] //nolint:gosec // keep <= len(w)
+	t.win = t.win[:len(t.win)-len(dropped)]
 }
 
 // push appends r to the window.
@@ -151,11 +150,11 @@ func (t *Tracker) push(r chain.BlockRef) {
 
 // finalizeTo makes f, a window ref, the finalized ref and drops the window refs at or below it.
 func (t *Tracker) finalizeTo(f chain.BlockRef) {
-	drop := int(f.Number - t.fin.Number) //nolint:gosec // f is a window ref, so drop <= len(window)
-	for _, r := range t.window()[:drop] {
+	dead := t.window()[:f.Number-t.fin.Number]
+	for _, r := range dead {
 		delete(t.byHash, r.Hash)
 	}
-	t.start += drop
+	t.start += len(dead)
 	t.fin = f
 	// Compact once the dead prefix is longer than the window, so pruning stays amortized O(1).
 	if t.start > len(t.win)-t.start {

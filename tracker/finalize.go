@@ -18,7 +18,9 @@ import (
 // number; a single Finalize when f is in the window; and, when f is not in the window,
 // the entries of the walk to f followed by Finalize.
 //
-// On error Finalize returns nil entries and the Tracker's state is unchanged.
+// Finalize returns ErrWindowFull, without calling the Source, when walking to f would
+// grow the window past the cap. On error Finalize returns nil entries and the Tracker's
+// state is unchanged.
 func (t *Tracker) Finalize(ctx context.Context, f chain.BlockRef) ([]chainlog.Entry, error) {
 	if f.Hash == (common.Hash{}) {
 		return nil, fmt.Errorf("%w: zero block hash", ErrInconsistentSource)
