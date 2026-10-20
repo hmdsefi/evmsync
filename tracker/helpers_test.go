@@ -29,7 +29,6 @@ type env struct {
 	lg    *chainlog.Memory       // every returned batch is appended here and must succeed
 	names map[common.Hash]string // "G", "A5", "B7"… for call traces and entry lists
 	cfg   tracker.Config         // the tracker's configuration; a zero Filter becomes flt
-	s     chain.Source           // the Source the tracker reads
 	g     chain.BlockRef         // genesis
 }
 
@@ -54,7 +53,6 @@ func newBareEnv(t *testing.T, cfg tracker.Config, f fakechain.Faults, wrap func(
 		lg:    chainlog.NewMemory(c.Meta(flt), tracker.DefaultWindowCap),
 		names: map[common.Hash]string{g.Hash: "G"},
 		cfg:   cfg,
-		s:     s,
 		g:     g,
 	}
 }
@@ -271,6 +269,11 @@ func (e *env) unchanged(t *testing.T, before view) {
 	if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
 		t.Errorf("state changed: %+v, want %+v", after, before)
 	}
+}
+
+// ref returns the canonical ref of number n.
+func (e *env) ref(n uint64) chain.BlockRef {
+	return e.refs(n, n)[0]
 }
 
 // refs returns the canonical refs of numbers from..to.

@@ -44,50 +44,82 @@ func (t *Tracker) Head(ctx context.Context, h chain.Header) ([]chainlog.Entry, e
 	return entries, nil
 }
 
-// walk follows parent hashes from x until a parent is in K, then fetches the logs of the new
-// blocks. It returns the ancestor and the entries: a Revert to the ancestor when it is below the
-// tip, then one Block per new block in increasing number order. The slice has room for spare
-// more entries. walk changes nothing in t.
+// walk follows the branch of x down to K and fetches the logs of its new blocks. It returns the
+// ancestor and the entries: a Revert to the ancestor when it is below the tip, then one Block per
+// new block in increasing number order, with room for spare more entries. walk changes nothing in
+// t.
 func (t *Tracker) walk(ctx context.Context, x chain.BlockRef, spare int) (chain.BlockRef, []chainlog.Entry, error) {
-	// The new blocks from x down. Most walks add one or two blocks, which fit in buf.
+	// Most walks add one or two blocks, which fit in buf.
 	var buf [4]chain.BlockRef
-	refs := append(buf[:0], x)
+	anc, refs, err := t.branch(ctx, x, buf[:0])
+	if err != nil {
+		return chain.BlockRef{}, nil, err
+	}
+	entries, err := t.withLogs(ctx, anc, refs, spare)
+	if err != nil {
+		return chain.BlockRef{}, nil, err
+	}
+	return anc, entries, nil
+}
+
+// branch follows parent hashes from x until a parent is in K, appending x and every fetched ref to
+// refs, highest first. It returns that K ref, the ancestor, and refs.
+func (t *Tracker) branch(ctx context.Context, x chain.BlockRef, refs []chain.BlockRef) (chain.BlockRef, []chain.BlockRef, error) {
+	refs = append(refs, x)
+	// seen maps the hashes in refs to their numbers. Extending the tip never fetches, so it is
+	// built only once a fetch is needed.
+	var seen map[common.Hash]uint64
 	cur := x
-	var anc chain.BlockRef
 	for {
 		if p, ok := t.known(cur.Parent); ok {
 			if p.Number+1 != cur.Number {
-				return anc, nil, fmt.Errorf("%w: block %d %s has parent %s at height %d",
+				return chain.BlockRef{}, nil, fmt.Errorf("%w: block %d %s has parent %s at height %d",
 					ErrInconsistentSource, cur.Number, cur.Hash.Hex(), p.Hash.Hex(), p.Number)
 			}
-			anc = p
-			break
+			return p, refs, nil
 		}
 		if cur.Number-1 <= t.fin.Number {
-			return anc, nil, fmt.Errorf("%w: block %d %s does not descend from finalized block %d %s",
+			return chain.BlockRef{}, nil, fmt.Errorf("%w: block %d %s does not descend from finalized block %d %s",
 				ErrReorgBelowFinalized, cur.Number, cur.Hash.Hex(), t.fin.Number, t.fin.Hash.Hex())
 		}
+		if cur.Parent == (common.Hash{}) {
+			return chain.BlockRef{}, nil, fmt.Errorf("%w: block %d %s has a zero parent hash",
+				ErrInconsistentSource, cur.Number, cur.Hash.Hex())
+		}
+		if seen == nil {
+			seen = map[common.Hash]uint64{x.Hash: x.Number}
+		}
+		if n, ok := seen[cur.Parent]; ok {
+			return chain.BlockRef{}, nil, fmt.Errorf("%w: block %d %s has parent %s, which is block %d of the same branch",
+				ErrInconsistentSource, cur.Number, cur.Hash.Hex(), cur.Parent.Hex(), n)
+		}
 		if err := ctx.Err(); err != nil {
-			return anc, nil, fmt.Errorf("tracker: %w", err)
+			return chain.BlockRef{}, nil, fmt.Errorf("tracker: %w", err)
 		}
 		hd, err := t.src.HeaderByHash(ctx, cur.Parent)
 		if err != nil {
-			return anc, nil, fmt.Errorf("tracker: header %s (block %d): %w", cur.Parent.Hex(), cur.Number-1, err)
+			return chain.BlockRef{}, nil, fmt.Errorf("tracker: header %s (block %d): %w", cur.Parent.Hex(), cur.Number-1, err)
 		}
 		if hd.Ref.Hash != cur.Parent {
-			return anc, nil, fmt.Errorf("%w: header %s: got hash %s",
+			return chain.BlockRef{}, nil, fmt.Errorf("%w: header %s: got hash %s",
 				ErrInconsistentSource, cur.Parent.Hex(), hd.Ref.Hash.Hex())
 		}
 		if hd.Ref.Number != cur.Number-1 {
-			return anc, nil, fmt.Errorf("%w: header %s: got number %d, want %d",
+			return chain.BlockRef{}, nil, fmt.Errorf("%w: header %s: got number %d, want %d",
 				ErrInconsistentSource, cur.Parent.Hex(), hd.Ref.Number, cur.Number-1)
 		}
 		refs = append(refs, hd.Ref)
+		seen[hd.Ref.Hash] = hd.Ref.Number
 		cur = hd.Ref
 	}
+}
 
-	n := len(refs) + spare
+// withLogs fetches the logs of refs, lowest first, and returns the entries of a walk that ends at
+// anc: a Revert to anc when it is below the tip, then one Block per ref in increasing number
+// order. The slice holds exactly those entries plus room for spare more.
+func (t *Tracker) withLogs(ctx context.Context, anc chain.BlockRef, refs []chain.BlockRef, spare int) ([]chainlog.Entry, error) {
 	revert := anc.Number < t.tip().Number
+	n := len(refs) + spare
 	if revert {
 		n++
 	}
@@ -98,15 +130,15 @@ func (t *Tracker) walk(ctx context.Context, x chain.BlockRef, spare int) (chain.
 	for i := len(refs) - 1; i >= 0; i-- {
 		b := refs[i]
 		if err := ctx.Err(); err != nil {
-			return anc, nil, fmt.Errorf("tracker: %w", err)
+			return nil, fmt.Errorf("tracker: %w", err)
 		}
 		logs, err := t.src.Logs(ctx, b.Hash, t.filter)
 		if err != nil {
-			return anc, nil, fmt.Errorf("tracker: logs of block %d %s: %w", b.Number, b.Hash.Hex(), err)
+			return nil, fmt.Errorf("tracker: logs of block %d %s: %w", b.Number, b.Hash.Hex(), err)
 		}
 		entries = append(entries, chainlog.Entry{Kind: chainlog.KindBlock, Block: chain.Block{Ref: b, Logs: logs}})
 	}
-	return anc, entries, nil
+	return entries, nil
 }
 
 // checkCap returns ErrWindowFull when adding blocks up to x would grow the window past the cap.

@@ -57,6 +57,10 @@ import (
 
 var m = map[int]int{}
 
+type named map[string]bool
+
+var n named
+
 func f(c chan int) {
 	go func() {}()
 	select {
@@ -65,6 +69,8 @@ func f(c chan int) {
 	for range m {
 	}
 	for range []int{} {
+	}
+	for range n {
 	}
 	_ = sync.Mutex{}
 	_ = time.Second
@@ -83,9 +89,10 @@ func f(c chan int) {
 	want := []string{
 		`p.go:4:2: import "sync" is not allowed`,
 		`p.go:5:2: import "time" is not allowed`,
-		"p.go:11:2: go statement",
-		"p.go:12:2: select statement",
-		"p.go:15:2: range over a map",
+		"p.go:15:2: go statement",
+		"p.go:16:2: select statement",
+		"p.go:19:2: range over a map",
+		"p.go:23:2: range over a map",
 	}
 	if got := purityFindings(fset, f, info); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("findings:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
