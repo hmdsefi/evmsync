@@ -4,6 +4,7 @@
 package invariant
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/internal/fakechain"
@@ -25,9 +26,11 @@ func TestVariantFor(t *testing.T) {
 		}},
 	}
 	for _, tt := range tests {
-		if got := VariantFor(tt.seed); got != tt.want {
-			t.Errorf("VariantFor(%d) = %+v, want %+v", tt.seed, got, tt.want)
-		}
+		t.Run(fmt.Sprintf("seed=%d", tt.seed), func(t *testing.T) {
+			if got := VariantFor(tt.seed); got != tt.want {
+				t.Errorf("VariantFor = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 
 	// Every choice of every field appears over the first 200 seeds, and nothing else does.

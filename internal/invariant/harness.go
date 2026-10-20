@@ -67,6 +67,9 @@ func (cfg Config) withDefaults() Config {
 	if cfg.New == nil {
 		panic("evmsync: invariant: Config.New is nil")
 	}
+	if cfg.Seeds < 0 || cfg.ShortSeeds < 0 {
+		panic("evmsync: invariant: Config.Seeds or Config.ShortSeeds is negative")
+	}
 	if cfg.Seeds == 0 {
 		cfg.Seeds = 1000
 	}
@@ -157,9 +160,9 @@ func selectSeeds(cfg Config) ([]uint64, bool, error) {
 			return nil, false, err
 		}
 	}
-	count := uint64(cfg.Seeds) //nolint:gosec // a seed count is small
+	count := uint64(cfg.Seeds) //nolint:gosec // withDefaults rejects a negative count
 	if testing.Short() {
-		count = uint64(cfg.ShortSeeds) //nolint:gosec // a seed count is small
+		count = uint64(cfg.ShortSeeds) //nolint:gosec // withDefaults rejects a negative count
 	}
 	if s := os.Getenv(envSeeds); s != "" {
 		var err error
@@ -250,6 +253,8 @@ func check(t testing.TB, cfg Config, seed uint64) (outcome, error) {
 	v := cfg.Variant(seed)
 	c := fakechain.New(seed, v.Params)
 	src := fakechain.NewSource(c, seed, v.Faults)
+	// A scenario runs under Background, not t.Context(), so a test's cancellation never becomes a
+	// divergence; ctx never leaves the scenario.
 	s := &scenario{
 		t:    t,
 		cfg:  cfg,
@@ -466,8 +471,11 @@ func (s *scenario) drain(lg chainlog.Log, sub Subject) error {
 	if err := consumer.Run(ctx, lg, &cancelAt{Subject: sub, at: head, cancel: cancel}); err != context.Canceled { //nolint:errorlint // Run returns ctx.Err() unchanged
 		return fmt.Errorf("run to offset %d: %w", head, err)
 	}
-	if off, err = sub.Offset(s.ctx); err != nil || off != head {
-		return fmt.Errorf("offset %d after the run to %d (%v)", off, head, err)
+	if off, err = sub.Offset(s.ctx); err != nil {
+		return fmt.Errorf("offset after the run to %d: %w", head, err)
+	}
+	if off != head {
+		return fmt.Errorf("offset %d after the run to %d", off, head)
 	}
 	return nil
 }
@@ -490,9 +498,22 @@ func (c *cancelAt) Apply(ctx context.Context, e chainlog.Entry) error {
 // reference returns the digest of a fresh subject drained over a log of the final canonical
 // blocks alone: the backfill path, sparse final blocks, against the realtime path of the scenario.
 func (s *scenario) reference(g chain.BlockRef, canon []chain.Block) ([]byte, error) {
+	lg, err := s.referenceLog(g, canon)
+	if err != nil {
+		return nil, err
+	}
+	sub := s.newSubject()
+	if err := s.drain(lg, sub); err != nil {
+		return nil, err
+	}
+	return sub.Digest(s.ctx)
+}
+
+// referenceLog returns the reference log: the scenario log's metadata with the reference ID, and
+// referenceEntries over canon, whose last block is the head.
+func (s *scenario) referenceLog(g chain.BlockRef, canon []chain.Block) (*chainlog.Memory, error) {
 	meta := s.c.Meta(Filter)
 	meta.ID = referenceID(s.seed)
-
 	head := g
 	if len(canon) > 0 {
 		head = canon[len(canon)-1].Ref
@@ -501,11 +522,7 @@ func (s *scenario) reference(g chain.BlockRef, canon []chain.Block) ([]byte, err
 	if _, err := lg.Append(s.ctx, referenceEntries(g, head, canon)...); err != nil {
 		return nil, err
 	}
-	sub := s.newSubject()
-	if err := s.drain(lg, sub); err != nil {
-		return nil, err
-	}
-	return sub.Digest(s.ctx)
+	return lg, nil
 }
 
 // referenceID returns the reference log's ID for seed: the first 16 bytes of

@@ -159,6 +159,7 @@ func TestHarnessDetects(t *testing.T) {
 		name   string
 		cfg    func(Config) Config
 		prefix []string
+		also   string // text the error must also hold, when set
 	}{
 		{"dropped logs", func(c Config) Config {
 			c.Variant = func(seed uint64) Variant {
@@ -167,17 +168,17 @@ func TestHarnessDetects(t *testing.T) {
 				return v
 			}
 			return c
-		}, []string{"digest: ", "expected: "}},
+		}, []string{"digest: ", "expected: "}, ""},
 		{"reverts ignored", func(c Config) Config {
 			c.New = newIgnoreReverts
 			c.Reopen = func(tb testing.TB, _ Subject) Subject { return newIgnoreReverts(tb) }
 			return c
-		}, []string{"digest: "}},
+		}, []string{"digest: "}, ""},
 		{"final logs dropped", func(c Config) Config {
 			c.New = func(testing.TB) Subject { return dropFinalLogs{NewMemorySubject()} }
 			c.Reopen = func(testing.TB, Subject) Subject { return dropFinalLogs{NewMemorySubject()} }
 			return c
-		}, []string{"digest: "}},
+		}, []string{"digest: "}, ""},
 		{"state lost on restart", func(c Config) Config {
 			c.Reopen = func(tb testing.TB, old Subject) Subject {
 				off, err := old.Offset(ctx)
@@ -187,12 +188,12 @@ func TestHarnessDetects(t *testing.T) {
 				return claimsOffset{NewMemorySubject(), off}
 			}
 			return c
-		}, []string{"drain: "}},
+		}, []string{"drain: "}, "consumer: apply offset"},
 		{"constant digest", func(c Config) Config {
 			c.New = func(testing.TB) Subject { return constantDigest{NewMemorySubject()} }
 			c.Reopen = func(testing.TB, Subject) Subject { return constantDigest{NewMemorySubject()} }
 			return c
-		}, []string{"expected: "}},
+		}, []string{"expected: "}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -202,13 +203,13 @@ func TestHarnessDetects(t *testing.T) {
 				if _, err := Check(t, cfg, seed); err != nil {
 					errs = append(errs, err.Error())
 					for _, p := range tt.prefix {
-						if strings.HasPrefix(err.Error(), p) {
+						if strings.HasPrefix(err.Error(), p) && strings.Contains(err.Error(), tt.also) {
 							return
 						}
 					}
 				}
 			}
-			t.Errorf("no seed in 1..50 failed with %q; errors: %q", tt.prefix, errs)
+			t.Errorf("no seed in 1..50 failed with %q and %q; errors: %q", tt.prefix, tt.also, errs)
 		})
 	}
 }
@@ -226,7 +227,10 @@ func TestDivergenceTexts(t *testing.T) {
 	cfg.New = newIgnoreReverts
 	cfg.Reopen = nil
 	for seed := uint64(1); seed <= 50; seed++ {
-		_, err := Check(t, cfg, seed)
+		rep, err := Check(t, cfg, seed)
+		if rep.Restarts != 0 {
+			t.Fatalf("seed %d: Restarts %d without Reopen", seed, rep.Restarts)
+		}
 		if err == nil {
 			continue
 		}
@@ -263,7 +267,11 @@ func TestStructuralReplay(t *testing.T) {
 		t.Errorf("replay stats %+v, want 7 blocks, 2 reverts, depth 2", st)
 	}
 
-	// A Revert whose target is not on the stack is an error.
+	// A Revert above the top, or whose target is not on the stack, is an error.
+	above := slices.Concat(es[:3], []chainlog.Entry{{Kind: chainlog.KindRevert, To: a[3]}})
+	if _, _, err := replay(above, g); err == nil || !strings.Contains(err.Error(), "above the top") {
+		t.Errorf("replay with a revert above the top: %v", err)
+	}
 	bad := slices.Concat(es[:5], []chainlog.Entry{{Kind: chainlog.KindRevert, To: b[0]}})
 	if _, _, err := replay(bad, g); err == nil || !strings.HasPrefix(err.Error(), "structure: ") {
 		t.Errorf("replay with a foreign revert target: %v, want a structure error", err)
@@ -394,6 +402,9 @@ func TestConfigMisuse(t *testing.T) {
 	cfg = memoryConfig()
 	cfg.New = nil
 	wantPanic(t, "evmsync: invariant: Config.New is nil", func() { _, _ = Check(t, cfg, 1) })
+	cfg = memoryConfig()
+	cfg.ShortSeeds = -1
+	wantPanic(t, "evmsync: invariant: Config.Seeds or Config.ShortSeeds is negative", func() { Run(t, cfg) })
 }
 
 func wantPanic(t *testing.T, msg string, fn func()) {
@@ -433,9 +444,9 @@ func TestPollTolerance(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), "settle: finalize: ") || s.rep.Tolerated != 1 {
 		t.Errorf("not-found without tolerance: %v, Tolerated %d; want a settle error, 1", err, s.rep.Tolerated)
 	}
-	bad := []chainlog.Entry{{Kind: chainlog.KindRevert, To: g}}
+	bad := []chainlog.Entry{{Kind: chainlog.KindRevert, To: chain.BlockRef{Number: 5, Hash: g.Hash}}}
 	err = s.add("poll at step 4", "append at step 4", g, "head", bad, nil, true)
-	if err == nil || !strings.HasPrefix(err.Error(), "append at step 4: offset 1: +revert 0: ") ||
+	if err == nil || !strings.HasPrefix(err.Error(), "append at step 4: offset 1: +revert 5: ") ||
 		!errors.Is(err, chainlog.ErrMalformed) {
 		t.Errorf("malformed append: %v, want an append error wrapping ErrMalformed", err)
 	}
@@ -443,16 +454,22 @@ func TestPollTolerance(t *testing.T) {
 
 func TestVerifyTexts(t *testing.T) {
 	ctx := t.Context()
+	// The same seed and calls give the same blocks, so twin's blocks 1 to 3 are c's canonical
+	// blocks and twin's block 4 extends them: a log over twin can be one block short or one long.
 	twin := fakechain.New(1, fakechain.Params{})
 	long := twin.Mine(4)
 	c := fakechain.New(1, fakechain.Params{})
 	c.Mine(3)
 	g := c.Genesis().Ref
-	logOf := func(refs []chain.BlockRef) *chainlog.Memory {
+	logOf := func(t *testing.T, refs []chain.BlockRef) *chainlog.Memory {
+		t.Helper()
 		lg := chainlog.NewMemory(c.Meta(Filter), 0)
 		es := []chainlog.Entry{{Kind: chainlog.KindFinalize, To: g}}
 		for _, r := range refs {
-			b, _ := twin.Block(r.Hash, Filter)
+			b, ok := twin.Block(r.Hash, Filter)
+			if !ok {
+				t.Fatalf("block %s missing", r)
+			}
 			es = append(es, chainlog.Entry{Kind: chainlog.KindBlock, Block: b})
 		}
 		if _, err := lg.Append(ctx, es...); err != nil {
@@ -474,16 +491,18 @@ func TestVerifyTexts(t *testing.T) {
 		{"offset behind", long[:3], func(chainlog.Offset) Subject { return NewMemorySubject() }, "offset: 0, want 4"},
 	}
 	for _, tt := range tests {
-		lg := logOf(tt.refs)
-		head, _ := lg.Head(ctx)
-		sub := NewMemorySubject()
-		if tt.sub != nil {
-			sub = tt.sub(head)
-		}
-		_, err := scenarioFor(t, c, lg, sub).verify(g)
-		if err == nil || err.Error() != tt.want {
-			t.Errorf("%s: %v, want %q", tt.name, err, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			lg := logOf(t, tt.refs)
+			head, _ := lg.Head(ctx)
+			sub := NewMemorySubject()
+			if tt.sub != nil {
+				sub = tt.sub(head)
+			}
+			_, err := scenarioFor(t, c, lg, sub).verify(g)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("%v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -495,28 +514,43 @@ func TestReferenceID(t *testing.T) {
 	if got := referenceID(0x0102); !bytes.Equal(got[:], h[:16]) {
 		t.Errorf("referenceID(0x0102) = %x, want %x", got, h[:16])
 	}
-	if referenceID(1) == fakechain.New(1, fakechain.Params{}).Meta(Filter).ID {
+	c := fakechain.New(1, fakechain.Params{})
+	if referenceID(1) == c.Meta(Filter).ID {
 		t.Error("the reference log shares the scenario log's ID")
+	}
+	c.Mine(5)
+	s := scenarioFor(t, c, nil, nil)
+	lg, err := s.referenceLog(c.Genesis().Ref, c.CanonicalBlocks(Filter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta, _ := lg.Meta(t.Context()); meta.ID != referenceID(1) || meta.ChainID != 31337 {
+		t.Errorf("reference log meta %+v, want ID %x", meta, referenceID(1))
 	}
 }
 
-// TestScenarioGolden pins what three seeds produce: a change to the harness's draws, polls or
-// fallback depth changes their reports. Seed 2's source has no finalized tag.
+// TestScenarioGolden pins what three seeds produce. A seed's scenario depends on the harness's
+// draws and polls, on fakechain's draws, and on the order of the tracker's Source calls and
+// appends, so a change to any of them changes these values. Such a change is expected when
+// TestReorgInvariant still passes: re-pin with the got values of the failure messages, and say why
+// in the commit. Seed 2's source has no finalized tag.
 func TestScenarioGolden(t *testing.T) {
-	want := map[uint64]Report{
-		1: {Entries: 766, Blocks: 678, Reverts: 29, MaxRevertDepth: 2, Restarts: 4},
-		2: {Entries: 682, Blocks: 521, Reverts: 53, MaxRevertDepth: 6, Tolerated: 5, Restarts: 2},
-		3: {Entries: 314, Blocks: 235, Reverts: 55, MaxRevertDepth: 5, Restarts: 4},
+	tests := []struct {
+		want Report
+		log  string
+	}{
+		{Report{Seed: 1, Entries: 766, Blocks: 678, Reverts: 29, MaxRevertDepth: 2, Restarts: 4}, "7f6b4da3a74d4735"},
+		{Report{Seed: 2, Entries: 682, Blocks: 521, Reverts: 53, MaxRevertDepth: 6, Tolerated: 5, Restarts: 2},
+			"90446bcee516147f"},
+		{Report{Seed: 3, Entries: 314, Blocks: 235, Reverts: 55, MaxRevertDepth: 5, Restarts: 4}, "4889f8cea595adc1"},
 	}
-	logs := map[uint64]string{1: "7f6b4da3a74d4735", 2: "90446bcee516147f", 3: "4889f8cea595adc1"}
-	for seed, w := range want {
-		w.Seed = seed
-		out, err := check(t, memoryConfig(), seed)
-		if err != nil || out.report != w {
-			t.Errorf("seed %d: Check = %#v, %v; want %#v", seed, out.report, err, w)
+	for _, tt := range tests {
+		out, err := check(t, memoryConfig(), tt.want.Seed)
+		if err != nil || out.report != tt.want {
+			t.Errorf("seed %d: Check = %#v, %v; want %#v", tt.want.Seed, out.report, err, tt.want)
 		}
-		if got := logFingerprint(out.log); got != logs[seed] {
-			t.Errorf("seed %d: log fingerprint %s, want %s", seed, got, logs[seed])
+		if got := logFingerprint(out.log); got != tt.log {
+			t.Errorf("seed %d: log fingerprint %s, want %s", tt.want.Seed, got, tt.log)
 		}
 	}
 }

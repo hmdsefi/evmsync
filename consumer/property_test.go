@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/chain"
@@ -150,48 +152,63 @@ func TestMemoryEquivalence(t *testing.T) {
 	if testing.Short() {
 		seeds = 30
 	}
-	var reverts, partial int
-	for seed := uint64(1); seed <= seeds; seed++ {
-		tr, apply, clone := newTrace()
-		m := consumer.NewMemory([]uint64{}, apply, clone)
-		model := &pendingModel{}
-		var stack []chain.BlockRef
-		states := 0
-		trackerRun(t, seed, func(es []chainlog.Entry) {
-			if stack == nil {
-				stack = []chain.BlockRef{es[0].To} // the first entry finalizes genesis
-			}
-			for _, e := range es {
-				before := model.clones
-				if err := m.Apply(t.Context(), e); err != nil {
-					t.Fatalf("seed %d: Apply offset %d (%s): %v", seed, e.Offset, e.Kind, err)
-				}
-				model.apply(t, e)
-				if e.Kind == chainlog.KindRevert {
-					reverts++
-					if model.clones > before {
-						partial++
-					}
-				}
-				want := liveNumbers(t, &stack, []chainlog.Entry{e})
-				got := m.State()
-				states++
-				if !slices.Equal(got, want) {
-					t.Fatalf("seed %d offset %d (%s): State() = %v, want %v", seed, e.Offset, e.Kind, got, want)
-				}
-				if tr.clones-states != model.clones {
-					t.Fatalf("seed %d offset %d (%s): %d clones besides State, want %d",
-						seed, e.Offset, e.Kind, tr.clones-states, model.clones)
-				}
-				if off, _ := m.Offset(t.Context()); off != e.Offset {
-					t.Fatalf("seed %d: Offset() = %d after applying %d", seed, off, e.Offset)
-				}
-			}
-		})
+	var reverts, partial atomic.Int64
+	t.Run("seeds", func(t *testing.T) {
+		for seed := uint64(1); seed <= seeds; seed++ {
+			t.Run("seed="+strconv.FormatUint(seed, 10), func(t *testing.T) {
+				t.Parallel()
+				r, p := equivalence(t, seed)
+				reverts.Add(r)
+				partial.Add(p)
+			})
+		}
+	})
+	if reverts.Load() == 0 || partial.Load() == 0 {
+		t.Errorf("%d reverts, %d of them partial; the property covers no revert case", reverts.Load(), partial.Load())
 	}
-	if reverts == 0 || partial == 0 {
-		t.Errorf("%d reverts, %d of them partial; the property covers no revert case", reverts, partial)
-	}
+}
+
+// equivalence applies seed's tracker entries to a Memory one by one and checks its state and
+// clone count after each. It returns the number of reverts and of partial reverts.
+func equivalence(t *testing.T, seed uint64) (reverts, partial int64) {
+	t.Helper()
+	tr, apply, clone := newTrace()
+	m := consumer.NewMemory([]uint64{}, apply, clone)
+	model := &pendingModel{}
+	var stack []chain.BlockRef
+	states := 0
+	trackerRun(t, seed, func(es []chainlog.Entry) {
+		if stack == nil {
+			stack = []chain.BlockRef{es[0].To} // the first entry finalizes genesis
+		}
+		for _, e := range es {
+			before := model.clones
+			if err := m.Apply(t.Context(), e); err != nil {
+				t.Fatalf("seed %d: Apply offset %d (%s): %v", seed, e.Offset, e.Kind, err)
+			}
+			model.apply(t, e)
+			if e.Kind == chainlog.KindRevert {
+				reverts++
+				if model.clones > before {
+					partial++
+				}
+			}
+			want := liveNumbers(t, &stack, []chainlog.Entry{e})
+			got := m.State()
+			states++
+			if !slices.Equal(got, want) {
+				t.Fatalf("seed %d offset %d (%s): State() = %v, want %v", seed, e.Offset, e.Kind, got, want)
+			}
+			if tr.clones-states != model.clones {
+				t.Fatalf("seed %d offset %d (%s): %d clones besides State, want %d",
+					seed, e.Offset, e.Kind, tr.clones-states, model.clones)
+			}
+			if off, _ := m.Offset(t.Context()); off != e.Offset {
+				t.Fatalf("seed %d: Offset() = %d after applying %d", seed, off, e.Offset)
+			}
+		}
+	})
+	return reverts, partial
 }
 
 func TestMemoryRestartReplays(t *testing.T) {

@@ -5,15 +5,7 @@ package invariant
 
 import (
 	"testing"
-
-	"github.com/hmdsefi/evmsync/internal/fakechain"
 )
-
-// fakechainParams returns chain parameters with the given fork chance and depth, defaults
-// otherwise.
-func fakechainParams(forkPPM uint32, maxDepth uint64) fakechain.Params {
-	return fakechain.Params{ForkPPM: forkPPM, MaxForkDepth: maxDepth}
-}
 
 // BenchmarkScenario runs one 200-step scenario with the memory subject per iteration, over seeds
 // 1 to 100 in turn; the target is 5 ms per scenario on CI amd64.

@@ -149,9 +149,17 @@ func TestBalancesIgnores(t *testing.T) {
 			t.Errorf("%s: Bal %v, Logs %d, want no balance change and one hashed log", tt.name, s.Bal, s.Logs)
 		}
 	}
-	max := ApplyBalances(NewBalances(), chain.Block{Ref: ref, Logs: []chain.Log{transfer(a1, 1, 2, word(1<<63-1))}})
-	if max.Bal[Key{a1, fakechain.Account(2)}] != 1<<63-1 {
-		t.Errorf("MaxInt64 transfer: Bal %v", max.Bal)
+	top := ApplyBalances(NewBalances(), chain.Block{Ref: ref, Logs: []chain.Log{transfer(a1, 1, 2, word(1<<63-1))}})
+	if top.Bal[Key{a1, fakechain.Account(2)}] != 1<<63-1 {
+		t.Errorf("MaxInt64 transfer: Bal %v", top.Bal)
+	}
+	// The zero Balances, as a store subject might rebuild it, is usable.
+	zero := ApplyBalances(Balances{}, chain.Block{Ref: ref, Logs: []chain.Log{transfer(a1, 1, 2, word(4))}})
+	if zero.Bal[Key{a1, fakechain.Account(2)}] != 4 {
+		t.Errorf("transfer onto the zero Balances: Bal %v", zero.Bal)
+	}
+	if c := CloneBalances(Balances{}); c.Bal == nil {
+		t.Error("CloneBalances(Balances{}) has a nil map")
 	}
 	self := ApplyBalances(NewBalances(), chain.Block{Ref: ref, Logs: []chain.Log{transfer(a1, 3, 3, word(9))}})
 	if len(self.Bal) != 0 {

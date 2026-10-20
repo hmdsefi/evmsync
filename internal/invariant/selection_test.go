@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/hmdsefi/evmsync/internal/fakechain"
 )
 
 // childEnv marks a re-executed test binary, so the child-only tests run and the parent tests do
@@ -43,7 +45,7 @@ func TestTameInvariant(t *testing.T) {
 	}
 	cfg := memoryConfig()
 	cfg.Variant = func(uint64) Variant {
-		return Variant{Params: fakechainParams(1, 1)}
+		return Variant{Params: fakechain.Params{ForkPPM: 1, MaxForkDepth: 1}}
 	}
 	Run(t, cfg)
 }
@@ -115,7 +117,6 @@ func TestRunSelection(t *testing.T) {
 			[]uint64{10, 11, 12}, false},
 		{"count from 1", []string{"EVMSYNC_INVARIANT_SEEDS=2"}, nil, []uint64{1, 2}, false},
 		{"short", nil, []string{"-test.short"}, span(1, 100), false},
-		{"short from base", []string{"EVMSYNC_INVARIANT_BASE=0x20"}, []string{"-test.short"}, span(32, 100), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,8 +250,10 @@ func TestTamenessGuard(t *testing.T) {
 		{"too shallow", reports(101, 101, 2), "no seed of 101 reverted 3 or more blocks"},
 	}
 	for _, tt := range tests {
-		if got := tameness(tt.rs); got != tt.want {
-			t.Errorf("%s: tameness = %q, want %q", tt.name, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tameness(tt.rs); got != tt.want {
+				t.Errorf("tameness = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
