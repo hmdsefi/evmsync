@@ -1,0 +1,3 @@
+package logtest
+
+import "testing"
