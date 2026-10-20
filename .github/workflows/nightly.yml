@@ -1,0 +1,29 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  invariant:
+    name: reorg invariant (100,000 seeds)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: reorg invariant
+        run: |
+          EVMSYNC_INVARIANT_SEEDS=100000 EVMSYNC_INVARIANT_BASE=$(date -u +%Y%m%d)000000 \
+            go test ./internal/invariant -run '^TestReorgInvariant$' -count=1 -timeout 120m
