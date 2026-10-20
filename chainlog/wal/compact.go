@@ -25,7 +25,7 @@ func (l *Log) compact(b chainlog.Offset) error {
 		return nil
 	}
 	cp := encodeCheckpoint(checkpoint{x: l.head, l: l.lastFin, state: l.state})
-	if err := writeFileAtomic(l.dir, checkpointName, cp, l.sync); err != nil {
+	if err := writeFileAtomic(l.dir, checkpointName, cp, l.fsync); err != nil {
 		return err
 	}
 
@@ -52,10 +52,8 @@ func (l *Log) compact(b chainlog.Offset) error {
 			return nil
 		}
 	}
-	if l.sync {
-		if err := syncDir(l.dir); err != nil {
-			return err
-		}
+	if err := syncDir(l.dir, l.fsync); err != nil {
+		return err
 	}
 	l.logger.Info("wal compacted",
 		slog.Uint64("before", uint64(b)),

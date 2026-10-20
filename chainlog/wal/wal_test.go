@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -38,23 +39,29 @@ func wantCorrupt(t *testing.T, err error, text string) {
 
 func TestOpenOptions(t *testing.T) {
 	tests := []struct {
+		name string
 		opts Options
 		want string
 	}{
-		{Options{SegmentSize: -1}, "wal: invalid options: segment size -1 is negative"},
-		{Options{Sync: 2}, "wal: invalid options: unknown sync policy 2"},
-		{Options{WindowCap: -1}, "wal: invalid options: window cap -1 is negative"},
-		{Options{WindowCap: MaxWindowCap + 1}, "wal: invalid options: window cap 10000001 is above 10000000"},
+		{"negative segment size", Options{SegmentSize: -1}, "wal: invalid options: segment size -1 is negative"},
+		{"unknown sync policy", Options{Sync: 2}, "wal: invalid options: unknown sync policy 2"},
+		{"negative window cap", Options{WindowCap: -1}, "wal: invalid options: window cap -1 is negative"},
+		{"window cap above the maximum", Options{WindowCap: MaxWindowCap + 1}, "wal: invalid options: window cap 10000001 is above 10000000"},
 	}
 	for _, tt := range tests {
-		dir := filepath.Join(t.TempDir(), "wal")
-		_, err := Open(dir, tt.opts)
-		if err == nil || err.Error() != tt.want {
-			t.Errorf("Open(%+v) = %v, want %q", tt.opts, err, tt.want)
-		}
-		if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("Open with bad options touched the directory: %v", err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "wal")
+			l, err := Open(dir, tt.opts)
+			if err == nil {
+				_ = l.Close()
+			}
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("Open(%+v) = %v, want %q", tt.opts, err, tt.want)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Open with bad options touched the directory: %v", err)
+			}
+		})
 	}
 
 	dir := filepath.Join(t.TempDir(), "wal")
@@ -429,7 +436,10 @@ func TestCheckpointOpen(t *testing.T) {
 	// A bad checkpoint state also wraps chainlog.ErrBadState.
 	dir = copyDir(t, base)
 	damageCheckpoint(t, dir, reencode(uint64(cp.x), 0, badState))
-	if _, err := Open(dir, testOpts(512)); !errors.Is(err, chainlog.ErrBadState) {
+	if l, err := Open(dir, testOpts(512)); !errors.Is(err, chainlog.ErrBadState) {
+		if err == nil {
+			_ = l.Close()
+		}
 		t.Errorf("Open with a bad checkpoint state = %v, want one wrapping chainlog.ErrBadState", err)
 	}
 }
@@ -476,7 +486,10 @@ func TestOpenScanErrors(t *testing.T) {
 			dir := copyDir(t, base)
 			tt.damage(dir)
 			before := listing(t, dir)
-			_, err := Open(dir, testOpts(512))
+			l, err := Open(dir, testOpts(512))
+			if err == nil {
+				_ = l.Close()
+			}
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("Open = %v, want one wrapping ErrCorrupt", err)
 			}
@@ -658,10 +671,12 @@ func TestSegmentName(t *testing.T) {
 		{"meta", 0, false},
 	}
 	for _, tt := range tests {
-		first, ok := parseSegmentName(tt.name)
-		if first != tt.first || ok != tt.ok {
-			t.Errorf("parseSegmentName(%q) = %d, %v; want %d, %v", tt.name, first, ok, tt.first, tt.ok)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			first, ok := parseSegmentName(tt.name)
+			if first != tt.first || ok != tt.ok {
+				t.Errorf("parseSegmentName(%q) = %d, %v; want %d, %v", tt.name, first, ok, tt.first, tt.ok)
+			}
+		})
 	}
 }
 
@@ -838,4 +853,176 @@ func TestOpenSegmentZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	openCorrupt(t, dir, "wal: corrupt log: segment "+segmentName(0)+" does not follow offset 0")
+}
+
+// syncRecorder is a sync hook that records the name of every file fsynced, and fails the fsync of
+// the first file whose base name is failOn.
+type syncRecorder struct {
+	mu     sync.Mutex
+	names  []string
+	failOn string
+}
+
+func (r *syncRecorder) sync(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.names = append(r.names, filepath.Base(name))
+	if r.failOn != "" && filepath.Base(name) == r.failOn {
+		r.failOn = ""
+		return syscall.EIO
+	}
+	return nil
+}
+
+func (r *syncRecorder) take() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	names := r.names
+	r.names = nil
+	return names
+}
+
+// TestSyncOrder checks every fsync of SyncAlways, in order: creation, append and roll.
+func TestSyncOrder(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "wal")
+	rec := &syncRecorder{}
+	opts := testOpts(512)
+	opts.Sync = SyncAlways
+	l := openLog(t, dir, opts, hooks{sync: rec.sync})
+	base := filepath.Base(dir)
+	wantSame(t, "fsyncs of a new log", rec.take(), []string{"meta.tmp", base, base})
+
+	mustAppend(t, l, linkedBlocks(1, 1, 100)...)
+	wantSame(t, "fsyncs of an append", rec.take(), []string{firstSegment})
+
+	n := uint64(2)
+	for ; len(segmentNames(t, dir)) < 2; n++ {
+		mustAppend(t, l, linkedBlocks(n, 1, 100)...)
+	}
+	second := segmentNames(t, dir)[1]
+	got := rec.take()
+	wantSame(t, "fsyncs of a roll", got[len(got)-4:], []string{"checkpoint.tmp", base, base, second})
+
+	opts.Sync = SyncNever
+	never := openLog(t, t.TempDir(), opts, hooks{sync: rec.sync})
+	mustAppend(t, never, linkedBlocks(1, 1, 100)...)
+	wantSame(t, "fsyncs with SyncNever", rec.take(), []string(nil))
+}
+
+// TestSyncFailure fails one fsync of an append or of a roll: the Append fails with that error, the
+// log is unchanged, and the failure is sticky.
+func TestSyncFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		file   func(dir string) string // the base name of the file whose fsync fails
+		nth    int                     // fail its nth fsync after the first block
+		blocks uint64                  // blocks appended before the failing Append
+	}{
+		{"segment", func(string) string { return firstSegment }, 1, 0},
+		{"checkpoint of a roll", func(string) string { return "checkpoint.tmp" }, 1, 1},
+		{"directory after the roll's new segment", filepath.Base, 2, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			dir := t.TempDir()
+			armed, seen := false, 0
+			h := hooks{sync: func(name string) error {
+				if armed && filepath.Base(name) == tt.file(dir) {
+					if seen++; seen == tt.nth {
+						return syscall.EIO
+					}
+				}
+				return nil
+			}}
+			opts := testOpts(512)
+			opts.Sync = SyncAlways
+			l := openLog(t, dir, opts, h)
+			if tt.blocks > 0 {
+				mustAppend(t, l, linkedBlocks(1, tt.blocks, 100)...) // a full segment: the next Append rolls
+			}
+			before := snap(t, l)
+			armed = true
+			next := linkedBlocks(tt.blocks+1, 1, 100)
+			_, err := l.Append(ctx, next...)
+			if !errors.Is(err, ErrFailed) || !errors.Is(err, syscall.EIO) {
+				t.Fatalf("Append with a failing fsync = %v, want ErrFailed and EIO", err)
+			}
+			path := filepath.Join(dir, tt.file(dir))
+			if tt.file(dir) == filepath.Base(dir) {
+				path = dir
+			}
+			if got, want := err.Error(), "wal: log failed: append: wal: sync "+path+": "+syscall.EIO.Error(); got != want {
+				t.Errorf("Append error =\n%q\nwant\n%q", got, want)
+			}
+			wantSame(t, "log after the failed Append", snap(t, l), before)
+			if _, err := l.Append(ctx, next...); !errors.Is(err, ErrFailed) {
+				t.Errorf("next Append = %v, want the sticky ErrFailed", err)
+			}
+		})
+	}
+}
+
+// TestOpenCorruptActive flips a byte of the first of three records in the active segment: more
+// records follow it, so it is corruption, not a torn write.
+func TestOpenCorruptActive(t *testing.T) {
+	dir := newLog(t, testOpts(0), 3)
+	rewrite(t, dir, firstSegment, func(b []byte) []byte { b[20] ^= 1; return b })
+	before := listing(t, dir)
+	l, err := Open(dir, testOpts(0))
+	if err == nil {
+		_ = l.Close()
+	}
+	if !errors.Is(err, ErrCorrupt) || !strings.HasPrefix(err.Error(), "wal: corrupt log: segment "+firstSegment+" position 0: ") {
+		t.Errorf("Open = %v, want ErrCorrupt at position 0", err)
+	}
+	wantSame(t, "files after a failed Open", listing(t, dir), before)
+}
+
+// TestReadClose closes the log under readers: every Read returns entries or ErrClosed.
+func TestReadClose(t *testing.T) {
+	ctx := t.Context()
+	l, err := Open(t.TempDir(), testOpts(4096))
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := linkedBlocks(1, 300, 40)
+	for i := 0; i < len(es); i += 8 {
+		if _, err := l.Append(ctx, es[i:min(i+8, len(es))]...); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append(ctx, finalizeTo(es[min(i+8, len(es))-1].Block.Ref)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const readers = 8
+	var wg sync.WaitGroup
+	started := make(chan struct{}, readers)
+	errs := make([]error, readers)
+	for r := range readers {
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				_, err := l.Read(ctx, 1, 400)
+				if i == 0 {
+					started <- struct{}{}
+				}
+				if err != nil {
+					errs[r] = err
+					return
+				}
+			}
+		})
+	}
+	for range readers {
+		<-started
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+	for r, err := range errs {
+		if err != chainlog.ErrClosed { //nolint:errorlint // the contract returns ErrClosed unwrapped
+			t.Errorf("reader %d stopped with %v, want ErrClosed", r, err)
+		}
+	}
 }

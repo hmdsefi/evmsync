@@ -118,3 +118,21 @@ func BenchmarkOpen(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkReadTail reads one entry 255 records past an indexed record, as a consumer following
+// the tail does: Read skips the records before it by their headers.
+func BenchmarkReadTail(b *testing.B) {
+	ctx := b.Context()
+	l, err := Open(b.TempDir(), Options{Sync: SyncNever})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer l.Close()
+	fill(b, l, 1024)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := l.Read(ctx, 511, 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

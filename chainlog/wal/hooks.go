@@ -14,6 +14,7 @@ type hooks struct {
 	write   func(f *os.File, p []byte) (int, error) // nil means f.Write
 	replay  func(off chainlog.Offset)               // each entry Open applies after the checkpoint
 	removed func(name string) bool                  // after each segment deletion; false stops compaction there
+	sync    func(name string) error                 // before each fsync; an error replaces the fsync
 }
 
 func (h *hooks) writeTo(f *os.File, p []byte) (int, error) {

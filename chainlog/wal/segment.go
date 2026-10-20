@@ -60,27 +60,44 @@ func parseSegmentName(name string) (chainlog.Offset, bool) {
 	return chainlog.Offset(n), true
 }
 
-// readRecord reads the next record from r into *buf and returns it. When the input ends inside
-// the record it returns the bytes it has and no error, so chainlog.Decode reports the record as
-// incomplete. Only other read errors are returned.
-func readRecord(r *bufio.Reader, buf *[]byte) ([]byte, error) {
+// readRecord reads the next record from r into *buf and returns it. remaining is the number of
+// bytes left in the input; it bounds the allocation for a record whose declared length is larger.
+// When the input ends inside the record it returns the bytes it has and no error, so
+// chainlog.Decode reports the record as incomplete. Only other read errors are returned.
+func readRecord(r *bufio.Reader, buf *[]byte, remaining int64) ([]byte, error) {
 	b := (*buf)[:0]
 	b = append(b, make([]byte, recHeader)...)
 	n, err := io.ReadFull(r, b)
 	if err != nil {
 		return b[:n], eofIsNil(err)
 	}
-	length := binary.LittleEndian.Uint32(b)
+	length := int64(binary.LittleEndian.Uint32(b))
 	if length > chainlog.MaxRecordSize {
 		return b, nil // Decode rejects the length before it reads the body
 	}
-	b = append(b, make([]byte, length)...)
+	b = append(b, make([]byte, min(length, max(remaining-recHeader, 0)))...)
 	n, err = io.ReadFull(r, b[recHeader:])
 	*buf = b
 	if err != nil {
 		return b[:recHeader+n], eofIsNil(err)
 	}
 	return b, nil
+}
+
+// decodeAt decodes rec, which must hold the entry at offset want, and calls fn with it when fn is
+// not nil. It returns the record's length, or the Decode error or "offset %d, want %d".
+func decodeAt(rec []byte, want chainlog.Offset, fn func(chainlog.Entry)) (int, error) {
+	e, n, err := chainlog.Decode(rec)
+	if err != nil {
+		return 0, err
+	}
+	if e.Offset != want {
+		return 0, fmt.Errorf("offset %d, want %d", e.Offset, want)
+	}
+	if fn != nil {
+		fn(e)
+	}
+	return n, nil
 }
 
 func eofIsNil(err error) error {
@@ -91,31 +108,45 @@ func eofIsNil(err error) error {
 }
 
 // readRange calls fn with each entry of s from offset from to offset to, both within s, in
-// order. It starts at the nearest indexed record at or below from and reads with ReadAt, so it
-// is safe while the active segment grows. A record that fails to decode, or has the wrong
+// order. It starts at the nearest indexed record at or below from and skips the records before
+// from by their headers, then decodes each record, which checks its CRC. It reads with ReadAt, so
+// it is safe while the active segment grows. A record that fails to decode, or has the wrong
 // offset, is ErrCorrupt; other errors are I/O errors.
 func (s segment) readRange(from, to chainlog.Offset, fn func(chainlog.Entry)) error {
 	k := (from - s.first) / indexEvery
 	pos := s.index[k]
-	off := s.first + k*indexEvery
-	r := bufio.NewReaderSize(io.NewSectionReader(s.f, pos, s.size-pos), readBuffer)
+	r := bufio.NewReaderSize(io.NewSectionReader(s.f, pos, s.size-pos), int(min(readBuffer, max(s.size-pos, 16))))
+	for off := s.first + k*indexEvery; off < from; off++ {
+		hdr, err := r.Peek(recHeader)
+		if err != nil {
+			return s.corrupt(pos, eofIsNil(err), chainlog.ErrIncomplete)
+		}
+		n := recHeader + int64(binary.LittleEndian.Uint32(hdr))
+		if _, err := r.Discard(int(min(n, s.size-pos))); err != nil {
+			return s.corrupt(pos, eofIsNil(err), chainlog.ErrIncomplete)
+		}
+		pos += n
+	}
 	var buf []byte
-	for ; off <= to; off++ {
-		rec, err := readRecord(r, &buf)
+	for off := from; off <= to; off++ {
+		rec, err := readRecord(r, &buf, s.size-pos)
 		if err != nil {
 			return ioErr("read", s.f.Name(), err)
 		}
-		e, n, err := chainlog.Decode(rec)
+		n, err := decodeAt(rec, off, fn)
 		if err != nil {
 			return fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, s.name, pos, err)
-		}
-		if e.Offset != off {
-			return fmt.Errorf("%w: segment %s position %d: offset %d, want %d", ErrCorrupt, s.name, pos, e.Offset, off)
-		}
-		if off >= from {
-			fn(e)
 		}
 		pos += int64(n)
 	}
 	return nil
+}
+
+// corrupt returns the error for a record at pos that ends before its header says: an I/O error
+// when ioErr is not nil, and otherwise ErrCorrupt wrapping cause.
+func (s segment) corrupt(pos int64, readErr, cause error) error {
+	if readErr != nil {
+		return ioErr("read", s.f.Name(), readErr)
+	}
+	return fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, s.name, pos, cause)
 }

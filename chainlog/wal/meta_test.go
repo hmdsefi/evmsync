@@ -143,14 +143,14 @@ func TestMetaCorrupt(t *testing.T) {
 
 func TestWriteFileAtomic(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		sync bool
-	}{{metaName, false}, {checkpointName, true}} {
+		name  string
+		fsync syncer
+	}{{metaName, nil}, {checkpointName, (*os.File).Sync}} {
 		dir := t.TempDir()
-		if err := writeFileAtomic(dir, tt.name, []byte("first"), tt.sync); err != nil {
+		if err := writeFileAtomic(dir, tt.name, []byte("first"), tt.fsync); err != nil {
 			t.Fatalf("writeFileAtomic: %v", err)
 		}
-		if err := writeFileAtomic(dir, tt.name, []byte("second"), tt.sync); err != nil {
+		if err := writeFileAtomic(dir, tt.name, []byte("second"), tt.fsync); err != nil {
 			t.Fatalf("writeFileAtomic over an existing file: %v", err)
 		}
 		got, err := os.ReadFile(filepath.Join(dir, tt.name))
@@ -174,7 +174,7 @@ func TestWriteFileAtomic(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "absent")
-	err := writeFileAtomic(missing, "meta", []byte("x"), true)
+	err := writeFileAtomic(missing, "meta", []byte("x"), (*os.File).Sync)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("writeFileAtomic into a missing directory = %v, want one wrapping fs.ErrNotExist", err)
 	}
@@ -187,14 +187,14 @@ func TestWriteFileAtomic(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "meta", "x"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	err = writeFileAtomic(dir, "meta", []byte("x"), false)
+	err = writeFileAtomic(dir, "meta", []byte("x"), nil)
 	if err == nil || !strings.HasPrefix(err.Error(), "wal: rename "+filepath.Join(dir, "meta")+": ") {
 		t.Errorf("writeFileAtomic onto a directory = %v, want a rename error", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "meta.tmp")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("meta.tmp after a failed rename: %v, want it removed", err)
 	}
-	if err := syncDir(missing); !errors.Is(err, fs.ErrNotExist) {
+	if err := syncDir(missing, (*os.File).Sync); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("syncDir of a missing directory = %v, want one wrapping fs.ErrNotExist", err)
 	}
 }
