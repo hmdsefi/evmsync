@@ -11,7 +11,8 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Bloom is the 2048-bit logsBloom of a block header, in header byte order.
+// Bloom is the 2048-bit logsBloom of a block header, in header byte order. Test, MayContain and
+// IsZero only read b and are safe for concurrent use; Add writes b.
 type Bloom [256]byte
 
 // keccak is a reusable Keccak-256 state with its output buffer.
