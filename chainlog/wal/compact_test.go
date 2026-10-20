@@ -156,6 +156,11 @@ func TestCompactionCrash(t *testing.T) {
 	if err := l.Truncate(ctx, 1000); err != nil {
 		t.Fatalf("Truncate after reopen: %v", err)
 	}
+	names := segmentNames(t, dir)
+	first, _ := parseSegmentName(names[0])
+	if o, _ := l.Oldest(ctx); o != first || len(names) >= len(segments)-1 {
+		t.Errorf("after the second Truncate: Oldest %d, %d segments; want the first remaining segment and fewer than %d", o, len(names), len(segments)-1)
+	}
 }
 
 // TestCompactionBoundsDisk keeps truncating a long-running log and checks its directory size.
@@ -258,5 +263,99 @@ func TestTruncateConcurrentRead(t *testing.T) {
 	}
 	if o, _ := l.Oldest(t.Context()); o == 1 {
 		t.Error("Oldest is still 1: nothing was truncated")
+	}
+}
+
+// TestCompactionBound truncates a log whose newest entries follow its last Finalize: compaction
+// honors the caller's bound and the last finalize offset plus 1, and checkpoints at Head.
+func TestCompactionBound(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	es := finalizedBlocks(60)
+	es = append(es, linkedBlocks(61, 10, 40)...) // no Finalize after block 60
+	l := openLog(t, dir, compactOpts(512, SyncNever), hooks{})
+	for _, e := range es {
+		mustAppend(t, l, e)
+	}
+	bound := lastFinalize(es) + 1
+	names := segmentNames(t, dir)
+	firsts := make([]chainlog.Offset, len(names))
+	for i, name := range names {
+		firsts[i], _ = parseSegmentName(name)
+	}
+
+	// A caller bound at a segment's last offset keeps that segment: it holds the entry at the bound.
+	if err := l.Truncate(ctx, firsts[2]-1); err != nil {
+		t.Fatalf("Truncate(%d): %v", firsts[2]-1, err)
+	}
+	wantSame(t, "segments after Truncate at a segment's last offset", segmentNames(t, dir), names[1:])
+
+	// A caller bound at a segment's first offset keeps that segment and drops the ones before.
+	keep := firsts[2]
+	if err := l.Truncate(ctx, keep); err != nil {
+		t.Fatalf("Truncate(%d): %v", keep, err)
+	}
+	if o, _ := l.Oldest(ctx); o != keep {
+		t.Errorf("Oldest after Truncate(%d) = %d, want %d", keep, o, keep)
+	}
+	wantSame(t, "segments after Truncate at a segment's start", segmentNames(t, dir), names[2:])
+
+	// A bound beyond the last finalize offset stops at L+1: the segment holding it stays.
+	if err := l.Truncate(ctx, 1000); err != nil {
+		t.Fatalf("Truncate(1000): %v", err)
+	}
+	var wantKept []string
+	for i, name := range names {
+		last := chainlog.Offset(len(es))
+		if i < len(names)-1 {
+			last = firsts[i+1] - 1
+		}
+		if i == len(names)-1 || last >= bound {
+			wantKept = append(wantKept, name)
+		}
+	}
+	wantSame(t, "segments after Truncate(1000)", segmentNames(t, dir), wantKept)
+	head, _ := l.Head(ctx)
+	b, _ := os.ReadFile(filepath.Join(dir, checkpointName))
+	cp, err := decodeCheckpoint(b, 0)
+	if err != nil || cp.x != head || cp.l != bound-1 {
+		t.Errorf("checkpoint x %d, l %d, %v; want Head %d and the last finalize %d", cp.x, cp.l, err, head, bound-1)
+	}
+	before := snap(t, l)
+	mustClose(t, l)
+	l = openLog(t, dir, compactOpts(512, SyncNever), hooks{})
+	wantSame(t, "log after reopen", snap(t, l), before)
+}
+
+// TestCompactionOrder records the fsyncs and deletions of a compaction with SyncAlways: the
+// checkpoint is durable before the first deletion, the directory fsync follows the last, and the
+// dropped files are closed.
+func TestCompactionOrder(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	var events []string
+	h := hooks{
+		sync:    func(name string) error { events = append(events, "sync "+filepath.Base(name)); return nil },
+		removed: func(name string) bool { events = append(events, "remove "+name); return true },
+	}
+	l := openLog(t, dir, compactOpts(512, SyncAlways), h)
+	for _, e := range finalizedBlocks(60) {
+		mustAppend(t, l, e)
+	}
+	names := segmentNames(t, dir)
+	firstFile := l.segs[0].f
+	events = nil
+	if err := l.Truncate(ctx, 1000); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+	kept := segmentNames(t, dir)
+	want := []string{"sync checkpoint.tmp", "sync " + filepath.Base(dir)}
+	for _, name := range names[:len(names)-len(kept)] {
+		want = append(want, "remove "+name)
+	}
+	want = append(want, "sync "+filepath.Base(dir))
+	wantSame(t, "fsyncs and deletions of a compaction", events, want)
+	if _, err := firstFile.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("a dropped segment's file reads %v, want os.ErrClosed", err)
 	}
 }

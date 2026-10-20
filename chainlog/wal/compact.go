@@ -4,7 +4,6 @@
 package wal
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,7 +44,9 @@ func (l *Log) compact(b chainlog.Offset) error {
 	for _, s := range dropped {
 		path := filepath.Join(l.dir, s.name)
 		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("wal: remove %s: %w", path, err)
+			// Stop here: deleting a later segment would leave a gap that Open rejects. The files
+			// left stay on disk until the next Open counts them again.
+			return ioErr("remove", path, err)
 		}
 		deleted++
 		if l.hooks.removed != nil && !l.hooks.removed(s.name) {
