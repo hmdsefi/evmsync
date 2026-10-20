@@ -6,6 +6,8 @@ package tracker
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -108,4 +110,61 @@ func BenchmarkHeadDuplicate(b *testing.B) {
 			b.Fatalf("Head(tip) = %v, %v", got, err)
 		}
 	}
+}
+
+// BenchmarkFinalizeSteady measures Finalize of the oldest window block, one block per call. The
+// tracker is rebuilt with a full window, outside the timer, once the window is empty, so the
+// window shrinks from its full size to zero between rebuilds and compacts along the way.
+func BenchmarkFinalizeSteady(b *testing.B) {
+	for _, window := range []int{1000, 100_000} {
+		b.Run(fmt.Sprintf("window=%d", window), func(b *testing.B) {
+			refs, src := benchChain(window + 1)
+			ctx := b.Context()
+			tr := benchTracker(b, refs, src, window)
+			next := 1
+			b.ReportAllocs()
+			for b.Loop() {
+				if next == len(refs) {
+					b.StopTimer()
+					tr = benchTracker(b, refs, src, window)
+					next = 1
+					b.StartTimer()
+				}
+				if _, err := tr.Finalize(ctx, refs[next]); err != nil {
+					b.Fatal(err)
+				}
+				next++
+			}
+		})
+	}
+}
+
+// BenchmarkFillWindow fills an empty window with DefaultWindowCap heads, one block each, on one
+// tracker. B/op is everything the fill allocates, returned entries included; retained-B is the
+// heap the full tracker still holds after a garbage collection.
+func BenchmarkFillWindow(b *testing.B) {
+	refs, src := benchChain(DefaultWindowCap + 1)
+	ctx := b.Context()
+	var retained float64
+	b.ReportAllocs()
+	for b.Loop() {
+		var before, after runtime.MemStats
+		b.StopTimer()
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		b.StartTimer()
+		tr := benchTracker(b, refs, src, 0)
+		for _, r := range refs[1:] {
+			if _, err := tr.Head(ctx, chain.Header{Ref: r}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		runtime.GC()
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(tr)
+		retained = float64(after.HeapAlloc) - float64(before.HeapAlloc)
+		b.StartTimer()
+	}
+	b.ReportMetric(retained, "retained-B")
 }
