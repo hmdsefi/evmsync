@@ -104,12 +104,12 @@ var (
 	hash22 = common.Hash(rep(0x22, 32))
 )
 
-// revertR is the AT-LOG-15 revert entry; its record is 78 bytes.
+// revertR is the revert of the layout test; its record is 78 bytes.
 func revertR() Entry {
 	return Entry{Offset: 1, Kind: KindRevert, To: chain.BlockRef{Number: 5, Hash: hash11, Parent: hash22, Time: 1000}}
 }
 
-// finalBlock is the AT-LOG-15 block: Final, one log with address 20×aa, one topic, data 01 02,
+// finalBlock is the block of the layout test: Final, one log with address 20×aa, one topic, data 01 02,
 // tx hash 32×bb, tx index 1, index 300.
 func finalBlock() (Entry, common.Hash) {
 	ref := blk(7, 0)
@@ -236,6 +236,8 @@ func TestDecodeErrors(t *testing.T) {
 	nlogs1000 := cat(blockHead, []byte{0x00}, uv(1000))
 	nlogs1000Body := cat(nlogs1000, make([]byte, 200-len(nlogs1000)))
 	minLog := cat(rep(0xaa, 20), []byte{0x00, 0x00}, rep(0xbb, 32), []byte{0x00})
+	fb, _ := finalBlock()
+	fbBody := Encode(nil, fb)[8:]
 
 	tests := []struct {
 		name   string
@@ -267,6 +269,7 @@ func TestDecodeErrors(t *testing.T) {
 		{"ref.time overflows", record(cat(rb[:3+1+64], rep(0xff, 11))), ErrPayload, "ref.time: varint overflows uint64"},
 		{"trailing byte", record(cat(rb, []byte{0x00})), ErrTrailing, "1 bytes after the payload"},
 		{"trailing bytes after a block", record(cat(blockHead, []byte{0x00, 0x00, 0x07, 0x07})), ErrTrailing, "2 bytes after the payload"},
+		{"trailing byte after logs", record(cat(fbBody, []byte{0x00})), ErrTrailing, "1 bytes after the payload"},
 		{"flags cut", record(blockHead), ErrPayload, "flags: truncated"},
 		{"flags 02", record(cat(blockHead, []byte{0x02, 0x00})), ErrPayload, "flags 0x02 has unknown bits"},
 		{"flags 80", record(cat(blockHead, []byte{0x80, 0x00})), ErrPayload, "flags 0x80 has unknown bits"},
@@ -357,6 +360,19 @@ func TestDecodeValues(t *testing.T) {
 		t.Errorf("log without topics and data: Topics %#v, Data %#v, Index %d; want nil, nil, 4", l.Topics, l.Data, l.Index)
 	}
 
+	mixed := mkLogs(blk(9, 0), 3, 2, 5)
+	mixed[1].Topics, mixed[1].Data = nil, nil
+	got, _, err = Decode(Encode(nil, Entry{Offset: 9, Kind: KindBlock, Block: chain.Block{Ref: blk(9, 0), Logs: mixed}}))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if l := got.Block.Logs[1]; l.Topics != nil || l.Data != nil {
+		t.Errorf("bare log between logs with topics and data: Topics %#v, Data %#v; want nil, nil", l.Topics, l.Data)
+	}
+	if l := got.Block.Logs[2]; len(l.Topics) != 2 || len(l.Data) != 5 {
+		t.Errorf("log 2: %d topics, %d data bytes; want 2 and 5", len(l.Topics), len(l.Data))
+	}
+
 	for _, kind := range []Kind{KindRevert, KindFinalize} {
 		e := Entry{Offset: 77, Kind: kind, To: blk(12, 3)}
 		got, _, err := Decode(Encode(nil, e))
@@ -390,7 +406,29 @@ func TestDecodeValues(t *testing.T) {
 	}
 }
 
-// roundTripEntries are the AT-LOG-19 entries.
+func TestDecodeMaxRecordSize(t *testing.T) {
+	ref := blk(7, 0)
+	sized := func(dataLen int) Entry {
+		l := chain.Log{Data: make([]byte, dataLen)}
+		return Entry{Offset: 1, Kind: KindBlock, Block: chain.Block{Ref: ref, Logs: []chain.Log{l}}}
+	}
+	fixed := len(Encode(nil, sized(0))) - 8 - 1 // the body without its one-byte data length
+	exact := sized(MaxRecordSize - fixed - 4)   // a 4-byte data length
+	rec := Encode(nil, exact)
+	if len(rec) != 8+MaxRecordSize {
+		t.Fatalf("test setup: record of %d bytes, want %d", len(rec), 8+MaxRecordSize)
+	}
+	if _, n, err := Decode(rec); err != nil || n != 8+MaxRecordSize {
+		t.Errorf("Decode of a body of exactly MaxRecordSize = %d, %v; want %d, nil", n, err, 8+MaxRecordSize)
+	}
+	over := Encode(nil, sized(MaxRecordSize-fixed-3))
+	if _, _, err := Decode(over); !errors.Is(err, ErrRecordTooLarge) {
+		t.Errorf("Decode of a body of MaxRecordSize+1: %v, want ErrRecordTooLarge", err)
+	}
+}
+
+// roundTripEntries cover offsets and numbers at varint boundaries, 0 to 10 logs, 0 to 4 topics,
+// data up to 70,000 bytes, the largest indexes, both Final values, a revert and a finalize.
 func roundTripEntries() []Entry {
 	ref := blk(7, 0)
 	maxRef := chain.BlockRef{Number: math.MaxUint64, Hash: h(1, 1), Parent: h(2, 2), Time: math.MaxUint64}
@@ -418,6 +456,10 @@ func roundTripEntries() []Entry {
 	for _, dl := range []int{0, 1, 70_000} {
 		es = append(es, Entry{Offset: 6, Kind: KindBlock, Block: chain.Block{Ref: ref, Logs: mkLogs(ref, 3, 1, dl)}})
 	}
+	mixed := mkLogs(ref, 4, 2, 5)
+	mixed[1].Topics, mixed[1].Data = nil, nil
+	mixed[3].Topics, mixed[3].Data = []common.Hash{}, []byte{}
+	es = append(es, Entry{Offset: 6, Kind: KindBlock, Block: chain.Block{Ref: ref, Logs: mixed}})
 	big := mkLogs(ref, 1, 4, 3)
 	big[0].TxIndex, big[0].Index = math.MaxUint32, math.MaxUint32
 	es = append(es,

@@ -33,6 +33,7 @@ func FuzzDecode(f *testing.F) {
 	f.Add(make([]byte, 8))
 	f.Add(tooLarge)
 	f.Add(record(cat(Encode(nil, revertR())[8:], []byte{0x00})))
+	f.Add(record(cat(three[8:], []byte{0x00})))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e, n, err := Decode(data)
@@ -63,9 +64,9 @@ func FuzzDecode(f *testing.F) {
 
 func FuzzRoundTrip(f *testing.F) {
 	h1, h2 := h(7, 0), h(6, 0)
-	// The AT-LOG-19 entries: offsets 1, 127, 128 and the largest; numbers 0 and the largest; 0, 1
-	// and 7 logs; 0 to 4 topics; 0, 1 and 70,000 bytes of data; the largest tx index and index;
-	// Final both ways; revert and finalize.
+	// Offsets 1, 127, 128 and the largest; numbers 0 and the largest; 0, 1 and 7 logs; 0 to 4
+	// topics; 0, 1 and 70,000 bytes of data; the largest tx index and index; Final both ways;
+	// revert and finalize.
 	f.Add(uint8(1), uint64(1), uint64(7), h1[:], h2[:], uint64(1000), false, uint8(0), uint8(0), []byte(nil), uint32(0), uint32(0))
 	f.Add(uint8(1), uint64(127), uint64(0), h1[:], h2[:], uint64(0), false, uint8(0), uint8(0), []byte(nil), uint32(0), uint32(0))
 	f.Add(uint8(2), uint64(128), uint64(math.MaxUint64), h1[:], h2[:], uint64(math.MaxUint64), false, uint8(0), uint8(0), []byte(nil), uint32(0), uint32(0))
@@ -73,6 +74,7 @@ func FuzzRoundTrip(f *testing.F) {
 	f.Add(uint8(0), uint64(5), uint64(7), h1[:], h2[:], uint64(1000), false, uint8(7), uint8(3), make([]byte, 70_000), uint32(2), uint32(10))
 	f.Add(uint8(0), uint64(5), uint64(math.MaxUint64), h1[:], h2[:], uint64(1000), true, uint8(1), uint8(1), []byte{}, uint32(0), uint32(0))
 	f.Add(uint8(0), uint64(5), uint64(0), []byte{}, []byte{}, uint64(0), false, uint8(2), uint8(2), []byte{9, 9}, uint32(1), uint32(1))
+	f.Add(uint8(0), uint64(6), uint64(9), h1[:], h2[:], uint64(1000), false, uint8(3), uint8(0), []byte{}, uint32(0), uint32(4))
 
 	f.Fuzz(func(t *testing.T, kind uint8, offset, number uint64, hash, parent []byte, time uint64,
 		final bool, nlogs, ntopics uint8, data []byte, txindex, index uint32,
