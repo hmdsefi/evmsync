@@ -195,6 +195,16 @@ func pad(a common.Address) common.Hash {
 	return h
 }
 
+// cloneLogs deep-copies logs, so an expected value never shares memory with a result under test.
+func cloneLogs(logs []chain.Log) []chain.Log {
+	out := slices.Clone(logs)
+	for i := range out {
+		out[i].Topics = slices.Clone(out[i].Topics)
+		out[i].Data = slices.Clone(out[i].Data)
+	}
+	return out
+}
+
 func logsEqual(a, b []chain.Log) bool {
 	return slices.EqualFunc(a, b, func(x, y chain.Log) bool {
 		return x.Address == y.Address && slices.Equal(x.Topics, y.Topics) && slices.Equal(x.Data, y.Data) &&
@@ -382,6 +392,13 @@ func TestExplicitAPI(t *testing.T) {
 		t.Errorf("after Reorg(6, 1) Finalized() = %v, want new block 1", got)
 	}
 
+	top := New(1, Params{})
+	top.Mine(3)
+	top.SetFinalized(3)
+	if top.Finalized() != top.Head() {
+		t.Errorf("SetFinalized(head): Finalized() = %v, want head %v", top.Finalized().Ref, top.Head().Ref)
+	}
+
 	// Returned values are copies.
 	c = New(4, Params{})
 	c.Mine(30)
@@ -393,13 +410,14 @@ func TestExplicitAPI(t *testing.T) {
 		}
 	}
 	first, _ := c.Block(h, chain.Filter{})
-	keep, _ := c.Block(h, chain.Filter{})
+	kb, _ := c.Block(h, chain.Filter{})
+	keep := cloneLogs(kb.Logs)
 	first.Logs[0].Topics[0] = common.Hash{9}
 	first.Logs[0].Data[31] ^= 0xff
 	first.Logs[0].Address = common.Address{9}
 	first.Logs = first.Logs[:0]
 	second, _ := c.Block(h, chain.Filter{})
-	if !logsEqual(second.Logs, keep.Logs) {
+	if !logsEqual(second.Logs, keep) {
 		t.Error("mutating a returned Block changed a later Block result")
 	}
 	blocks := c.CanonicalBlocks(chain.Filter{})
@@ -410,7 +428,7 @@ func TestExplicitAPI(t *testing.T) {
 		blocks[i].Logs = nil
 	}
 	again, _ := c.Block(h, chain.Filter{})
-	if !logsEqual(again.Logs, keep.Logs) {
+	if !logsEqual(again.Logs, keep) {
 		t.Error("mutating CanonicalBlocks changed a later Block result")
 	}
 }
@@ -461,22 +479,37 @@ func TestReorgMovesLogs(t *testing.T) {
 			b, _ := c.Block(h.Ref.Hash, chain.Filter{})
 			pool = append(pool, b.Logs...)
 		}
+		// Every orphaned log moves (one Chance each); then Intn(2) per pool log picks its block.
+		model := *c.logRand
+		for range pool {
+			model.Uint64()
+		}
+		target := map[common.Hash]uint64{}
+		for _, l := range pool {
+			target[l.TxHash] = 4 + model.Intn(2)
+		}
 		c.Reorg(3, 2)
 		var gotMoved []chain.Log
 		for n := uint64(4); n <= 5; n++ {
 			h, _ := c.Canonical(n)
 			b, _ := c.Block(h.Ref.Hash, chain.Filter{})
-			fresh := true
+			fresh, lastPool := true, -1
 			for i, l := range b.Logs {
 				if l.Index != uint32(i) || l.TxIndex != uint32(i) {
 					t.Fatalf("seed %d block %d: log %d has Index %d TxIndex %d", seed, n, i, l.Index, l.TxIndex)
 				}
-				isMoved := slices.ContainsFunc(pool, func(p chain.Log) bool { return p.TxHash == l.TxHash })
-				if !isMoved && !fresh {
+				pi := slices.IndexFunc(pool, func(p chain.Log) bool { return p.TxHash == l.TxHash })
+				if pi < 0 && !fresh {
 					t.Fatalf("seed %d block %d: fresh log %d after a moved log", seed, n, i)
 				}
-				if isMoved {
-					fresh = false
+				if pi >= 0 {
+					if pi < lastPool {
+						t.Fatalf("seed %d block %d: moved log %d is pool log %d after pool log %d", seed, n, i, pi, lastPool)
+					}
+					if target[l.TxHash] != n {
+						t.Fatalf("seed %d: pool log %d moved to block %d, want %d", seed, pi, n, target[l.TxHash])
+					}
+					fresh, lastPool = false, pi
 					gotMoved = append(gotMoved, l)
 				}
 			}
@@ -484,7 +517,7 @@ func TestReorgMovesLogs(t *testing.T) {
 		if len(gotMoved) != len(pool) {
 			t.Fatalf("seed %d: %d logs moved, want all %d (MoveLogPPM 1,000,000)", seed, len(gotMoved), len(pool))
 		}
-		// Moved logs keep their content and pool order within each block.
+		// Moved logs keep their content.
 		for _, l := range gotMoved {
 			i := slices.IndexFunc(pool, func(p chain.Log) bool { return p.TxHash == l.TxHash })
 			p := pool[i]
@@ -546,7 +579,7 @@ func TestEventString(t *testing.T) {
 	}
 }
 
-// TestStepDraws checks the Step draw order of TST-120 against a model on the chain stream.
+// TestStepDraws checks Step's draw order against a model on the chain stream.
 func TestStepDraws(t *testing.T) {
 	for seed := uint64(1); seed <= 50; seed++ {
 		p := Params{ForkPPM: 400_000, MaxForkDepth: 5, MaxMine: 4, FinalityPPM: 600_000, MinLag: 1, MaxLag: 6}

@@ -82,6 +82,10 @@ func TestChanceDrawsOnce(t *testing.T) {
 			t.Errorf("Chance(%d) did not draw exactly once", ppm)
 		}
 	}
+	v := uint32(NewRand(5, "chain").Intn(1_000_000)) //nolint:gosec // below 1,000,000
+	if NewRand(5, "chain").Chance(v) || !NewRand(5, "chain").Chance(v+1) {
+		t.Errorf("Chance(ppm) for a draw of %d: want false at ppm %d and true at %d", v, v, v+1)
+	}
 	if !NewRand(5, "chain").Chance(1_000_000) {
 		t.Error("Chance(1_000_000) = false, want true")
 	}

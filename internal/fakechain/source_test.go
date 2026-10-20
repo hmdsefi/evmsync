@@ -102,7 +102,7 @@ func TestHonestSource(t *testing.T) {
 
 	var concat []chain.Log
 	for _, b := range c.CanonicalBlocks(DefaultFilter) {
-		concat = append(concat, b.Logs...)
+		concat = append(concat, cloneLogs(b.Logs)...)
 	}
 	got, err := src.LogsInRange(ctx, 1, 20, DefaultFilter)
 	if err != nil || !logsEqual(got, concat) || len(got) == 0 {
@@ -239,6 +239,10 @@ func TestFaults(t *testing.T) {
 		if h, _ := src.Latest(ctx); h != orphan {
 			t.Errorf("after Reorg(0, 1): Latest() = %v, want unchanged pair %v", h.Ref, orphan.Ref)
 		}
+		src.SetFaults(Faults{StaleOrphanPPM: 1_000_000, DropOrphans: true})
+		if h, _ := src.Latest(ctx); h != orphan {
+			t.Errorf("with DropOrphans: Latest() = %v, want the orphaned head %v", h.Ref, orphan.Ref)
+		}
 	})
 
 	t.Run("drop orphans", func(t *testing.T) {
@@ -338,7 +342,8 @@ func TestFaults(t *testing.T) {
 		_, _ = src.HeaderByHash(ctx, h.Ref.Hash)
 		_, _ = src.HeaderByNumber(ctx, 99)
 		_, _ = src.Logs(ctx, h.Ref.Hash, DefaultFilter)
-		_, _ = src.Logs(ctx, common.Hash{1}, DefaultFilter) // not found: no faults/logs draw
+		_, _ = src.Logs(ctx, common.Hash{1}, DefaultFilter)       // not found: no faults/logs draw
+		_, _ = src.Logs(ctx, c.Genesis().Ref.Hash, DefaultFilter) // found, no matching log: one draw
 		_, _ = src.LogsInRange(ctx, 3, 1, DefaultFilter)
 		_, _ = src.Finalized(ctx)
 		src.SetFaults(Faults{StaleDepth: 5}) // streams keep their positions
@@ -351,8 +356,8 @@ func TestFaults(t *testing.T) {
 		}{
 			{src.staleRand, "faults/stale", 22},
 			{src.orphanRand, "faults/orphan", 11},
-			{src.interleaveRand, "faults/interleave", 5},
-			{src.logsRand, "faults/logs", 1},
+			{src.interleaveRand, "faults/interleave", 6},
+			{src.logsRand, "faults/logs", 2},
 		}
 		for _, d := range draws {
 			fresh := NewRand(9, d.label)
@@ -364,6 +369,41 @@ func TestFaults(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestLatestDraws checks Latest's draws and answer against a model on the two fault streams.
+func TestLatestDraws(t *testing.T) {
+	ctx := t.Context()
+	var orphans, stales, heads int
+	for seed := uint64(1); seed <= 30; seed++ {
+		c := New(seed, Params{ForkPPM: 400_000})
+		src := NewSource(c, seed, Faults{StaleHeadPPM: 500_000, StaleOrphanPPM: 500_000, StaleDepth: 4})
+		orphanR, staleR := NewRand(seed, "faults/orphan"), NewRand(seed, "faults/stale")
+		for i := range 200 {
+			src.Do(func(c *Chain) { c.Step() })
+			o := orphanR.Chance(500_000)
+			s := staleR.Chance(500_000)
+			k := 1 + staleR.Intn(4)
+			head := c.Head().Ref.Number
+			want := c.Head()
+			switch {
+			case o && c.lastOrphan != (common.Hash{}) && c.lastFork >= c.finalized:
+				want, _ = c.Header(c.lastOrphan)
+				orphans++
+			case s:
+				want, _ = c.Canonical(head - min(k, head))
+				stales++
+			default:
+				heads++
+			}
+			if got, _ := src.Latest(ctx); got != want {
+				t.Fatalf("seed %d call %d: Latest() = %v, want %v", seed, i, got.Ref, want.Ref)
+			}
+		}
+	}
+	if orphans == 0 || stales == 0 || heads == 0 {
+		t.Errorf("answers: %d orphan, %d stale, %d head; want each at least once", orphans, stales, heads)
+	}
 }
 
 func TestConcurrency(t *testing.T) {

@@ -66,6 +66,7 @@ func TestSourceContract(t *testing.T) {
 	}
 	random := common.HexToHash("0xdeadbeef")
 	b7, _ := c.Block(h(7).Ref.Hash, chain.Filter{})
+	b7.Logs = cloneLogs(b7.Logs)
 	last := b7.Logs[len(b7.Logs)-1]
 	lastFilter := chain.Filter{Addresses: []common.Address{last.Address}}
 	for _, tp := range last.Topics {
@@ -99,7 +100,7 @@ func TestSourceContract(t *testing.T) {
 
 	var all []chain.Log
 	for _, b := range c.CanonicalBlocks(chain.Filter{}) {
-		all = append(all, b.Logs...)
+		all = append(all, cloneLogs(b.Logs)...)
 	}
 	unsupported := NewSource(c, seed, Faults{FinalizedUnsupported: true})
 
