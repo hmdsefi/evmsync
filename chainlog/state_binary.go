@@ -15,17 +15,19 @@ import (
 
 const (
 	stateVersion = 1
-	// minRefSize and maxRefSize bound an encoded ref: two one-byte or ten-byte varints around the
-	// two hashes.
+	// minRefSize is the smallest encoded ref: two one-byte varints around the two hashes.
 	minRefSize = 1 + 2*common.HashLength + 1
-	maxRefSize = 2*binary.MaxVarintLen64 + 2*common.HashLength
 )
 
 // MarshalBinary encodes s: version 1, a flags byte of 0, the tip and F, the window's length as
 // a varint and its refs. A ref is its number and time as varints around its hash and parent; the
 // zero ref is 66 bytes. The cap is not encoded. MarshalBinary never returns an error.
 func (s State) MarshalBinary() ([]byte, error) {
-	b := make([]byte, 0, 2+(2+len(s.win))*maxRefSize+binary.MaxVarintLen64)
+	size := 2 + refSize(s.tip) + refSize(s.fin) + binary.MaxVarintLen64
+	for _, r := range s.win {
+		size += refSize(r)
+	}
+	b := make([]byte, 0, size)
 	b = append(b, stateVersion, 0)
 	b = appendRef(b, s.tip)
 	b = appendRef(b, s.fin)

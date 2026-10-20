@@ -21,11 +21,11 @@ import (
 // with Clone are independent; plain assignment shares the window and must not be used after
 // either copy changes. A State is not safe for concurrent use.
 //
-// Check accepts an entry when:
-//   - a block is above the tip, and a non-final block is the tip's child (its parent is the tip's
-//     hash); only a Final block may be further above the tip, and only while the window is empty;
-//     it then becomes the tip and F;
-//   - a revert targets F or a window ref below the tip;
+// Check accepts an entry when its fields fit its kind and:
+//   - a block is above the tip, and a block one above the tip has the tip's hash as parent. A
+//     non-final block is always one above the tip. A Final block needs an empty window, may be
+//     further above the tip, and becomes the tip and F;
+//   - a revert is below the tip and targets F or a window ref;
 //   - a finalize does not go below F, does not conflict with F or a window ref at its number, and
 //     links to the window ref above it and to the tip when it is the tip's child;
 //   - a non-final block does not grow the window beyond the cap;
@@ -94,6 +94,17 @@ func (s *State) Check(e Entry) error {
 // Its cost grows with len(entries) and with the refs a Revert in the batch drops, never with the
 // window's length.
 func (s *State) CheckBatch(entries []Entry) (int, error) {
+	// Room for every block of the batch, made once: an append that grows the window inside the
+	// loop would copy all of it, and the undo would throw the copy away.
+	blocks := 0
+	for i := range entries {
+		if entries[i].Kind == KindBlock && !entries[i].Final {
+			blocks++
+		}
+	}
+	if cap(s.win)-len(s.win) < blocks {
+		s.win = slices.Grow(s.win, blocks)
+	}
 	var buf [8]undo
 	undos := buf[:0]
 	for i := range entries {
@@ -168,12 +179,16 @@ func (s *State) windowCap() int {
 
 // find returns the index of the window ref numbered n, or the index where it would be and false.
 func (s *State) find(n uint64) (int, bool) {
-	// Check keeps the window's numbers contiguous, so the ref numbered n is at n - first. Only a
-	// window built by Apply alone can have gaps; binary search handles those.
-	if len(s.win) > 0 && n >= s.win[0].Number {
-		if d := n - s.win[0].Number; d < uint64(len(s.win)) && s.win[d].Number == n {
-			return int(d), true //nolint:gosec // d < len(s.win)
-		}
+	if len(s.win) == 0 || n < s.win[0].Number {
+		return 0, false
+	}
+	if n > s.win[len(s.win)-1].Number {
+		return len(s.win), false
+	}
+	// In a window Check built, numbers are contiguous, so the ref numbered n is at n - first.
+	// Binary search handles the windows with gaps that only Apply builds.
+	if d := n - s.win[0].Number; d < uint64(len(s.win)) && s.win[d].Number == n {
+		return int(d), true //nolint:gosec // d < len(s.win)
 	}
 	return slices.BinarySearchFunc(s.win, n, func(r chain.BlockRef, n uint64) int { return cmp.Compare(r.Number, n) })
 }

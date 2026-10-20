@@ -55,6 +55,8 @@ func TestStateBinary(t *testing.T) {
 	b1, b2, b3 := blk(1, 0), blk(2, 0), blk(3, 0)
 	zero := chain.BlockRef{}
 	valid := stateBytes(b2, b1, b2)
+	late := b2
+	late.Time++
 	big := chain.BlockRef{Number: 300, Hash: h(300, 0)} // a two-byte number and time 0: 67 bytes
 	tests := []struct {
 		name   string
@@ -79,7 +81,7 @@ func TestStateBinary(t *testing.T) {
 		{"2 refs in 131 bytes", cat([]byte{0x01, 0x00}, refBytes(zero), refBytes(zero), []byte{0x02}, make([]byte, 131)), "2 window refs cannot fit in 131 bytes"},
 		{"window[1] cut", cat([]byte{0x01, 0x00}, refBytes(zero), refBytes(zero), []byte{0x02}, refBytes(big), refBytes(b2)[:65]), "window[1]: truncated"},
 		{"window[0] varint", cat([]byte{0x01, 0x00}, refBytes(zero), refBytes(zero), []byte{0x01, 0x80, 0x00}, make([]byte, 66)), "window[0]: bad varint"},
-		{"trailing bytes", cat(valid, []byte{0x00, 0x00}), "2 trailing bytes"},
+		{"trailing byte", cat(valid, []byte{0x00}), "1 trailing bytes"},
 		{"window not ascending", stateBytes(b2, zero, b3, b2), "window is not ascending"},
 		{"window repeats a number", stateBytes(b2, zero, b2, b2), "window is not ascending"},
 		{"window at F", stateBytes(b3, b2, b2, b3), "window ref 2 is not above finalized 2"},
@@ -87,6 +89,8 @@ func TestStateBinary(t *testing.T) {
 		{"tip not last", stateBytes(b1, zero, b1, b2), "tip " + b1.String() + " is not the last window ref"},
 		{"tip not F", stateBytes(b3, b2), "tip " + b3.String() + " is not the finalized ref"},
 		{"tip without F", stateBytes(b3, zero), "tip " + b3.String() + " is not the finalized ref"},
+		{"tip differs from the last ref in time only", stateBytes(late, zero, b1, b2), "tip " + late.String() + " is not the last window ref"},
+		{"tip differs from F in time only", stateBytes(late, b2), "tip " + late.String() + " is not the finalized ref"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,6 +108,15 @@ func TestStateBinary(t *testing.T) {
 			}
 		})
 	}
+
+	// A window that starts at block 0 with no F, as on a chain indexed from genesis.
+	genesis := build(t, 0, block(blk(0, 0)), block(blk(1, 0)))
+	gb, _ := genesis.MarshalBinary()
+	var gu State
+	if err := gu.UnmarshalBinary(gb); err != nil {
+		t.Fatalf("UnmarshalBinary of a window from block 0: %v", err)
+	}
+	wantState(t, gu, blk(1, 0), zero, refs(blk(0, 0), blk(1, 0)))
 
 	// The smallest refs are 66 bytes: two of them fit in exactly 132.
 	r1 := chain.BlockRef{Number: 1, Hash: h(1, 0), Parent: h(0, 0)}
