@@ -29,6 +29,9 @@ func TestAnchoring(t *testing.T) {
 	wantErr(t, err, tracker.ErrUnanchored, "tracker: no finalized block: head 3 "+a[2].Hash.Hex())
 	e.want(t, got)
 	e.wantCalls(t, "")
+	got, err = e.head(t, chain.BlockRef{Number: 3})
+	wantErr(t, err, tracker.ErrInconsistentSource, "tracker: inconsistent source: zero block hash")
+	e.want(t, got)
 
 	got = e.mustFinalize(t, a[6])
 	e.want(t, got, e.fin(a[6]))
@@ -73,6 +76,12 @@ func TestNewPanics(t *testing.T) {
 			"evmsync: tracker.New: state has blocks but no finalized block",
 		},
 		{
+			"tip not the last window block",
+			e.src, tracker.Config{}, stateOf(e.fin(e.g), e.blk(a[0]), e.blk(a[1]),
+				e.rev(chain.BlockRef{Number: 1, Hash: common.HexToHash("0x01")})),
+			"evmsync: tracker.New: window is not a parent-linked chain above the finalized block",
+		},
+		{
 			"window with a gap",
 			e.src, tracker.Config{}, stateOf(e.fin(e.g), e.blk(a[0]), e.blk(a[2])),
 			"evmsync: tracker.New: window is not a parent-linked chain above the finalized block",
@@ -85,12 +94,14 @@ func TestNewPanics(t *testing.T) {
 	}
 
 	t.Run("backfill prefix", func(t *testing.T) {
-		e.tr = tracker.New(e.src, tracker.Config{Filter: flt}, stateOf(e.fin(e.g), final(a[0]), final(a[2])))
-		got, err := e.tr.Head(t.Context(), chain.Header{Ref: a[3]})
-		if err != nil {
-			t.Fatalf("Head(A4): %v", err)
+		prefix := []chainlog.Entry{e.fin(e.g), final(a[0]), final(a[2])}
+		if _, err := e.lg.Append(t.Context(), prefix...); err != nil {
+			t.Fatal(err)
 		}
-		e.want(t, got, e.blk(a[3]))
+		e.tr = tracker.New(e.src, tracker.Config{Filter: flt}, stateOf(prefix...))
+		e.sameState(t)
+		e.want(t, e.mustHead(t, a[3]), e.blk(a[3]))
+		e.wantCalls(t, "L(A4)")
 	})
 }
 
@@ -359,6 +370,12 @@ func TestErrorsKeepState(t *testing.T) {
 			if err == nil || !errors.Is(err, errBoom) || !strings.HasSuffix(err.Error(), ": boom") {
 				t.Fatalf("err = %v, want one ending in \": boom\"", err)
 			}
+			switch k {
+			case 1:
+				wantErr(t, err, errBoom, "tracker: header "+b[3].Hash.Hex()+" (block 7): boom")
+			case 5:
+				wantErr(t, err, errBoom, "tracker: logs of block 4 "+b[0].Hash.Hex()+": boom")
+			}
 			e.want(t, got)
 			if calls := strings.Join(e.calls(), " "); calls != strings.Join(healthyCalls[:k], " ") {
 				t.Errorf("calls = %q, want %q", calls, strings.Join(healthyCalls[:k], " "))
@@ -513,6 +530,7 @@ func TestFinalizeInWindow(t *testing.T) {
 	e.want(t, e.mustFinalize(t, a[1]))
 	e.want(t, e.mustFinalize(t, a[2]))
 
+	before := viewOf(e.tr.State())
 	other := chain.BlockRef{Number: 3, Hash: common.HexToHash("0x03")}
 	got, err := e.finalize(t, other)
 	wantErr(t, err, tracker.ErrReorgBelowFinalized, "tracker: reorg below the finalized block: finalized block 3 is "+
@@ -526,13 +544,53 @@ func TestFinalizeInWindow(t *testing.T) {
 		" is at height 5, got 4")
 	e.want(t, got)
 
+	e.unchanged(t, before)
+
+	higherF := a[2]
+	higherF.Number = 5
+	got, err = e.finalize(t, higherF)
+	wantErr(t, err, tracker.ErrInconsistentSource, "tracker: inconsistent source: block "+a[2].Hash.Hex()+
+		" is at height 3, got 5")
+	e.want(t, got)
+	e.wantCalls(t, "")
+
 	got, err = e.finalize(t, chain.BlockRef{Number: 7})
 	wantErr(t, err, tracker.ErrInconsistentSource, "tracker: inconsistent source: zero block hash")
 	e.want(t, got)
+	e.unchanged(t, before)
+}
+
+func TestFinalizeErrorsKeepState(t *testing.T) {
+	healthyCalls := []string{"H(A5)", "H(A4)", "L(A4)", "L(A5)", "L(A6)"}
+	for k := 1; k <= len(healthyCalls); k++ {
+		t.Run(healthyCalls[k-1], func(t *testing.T) {
+			var fs *failingSource
+			e := newEnv(t, tracker.Config{}, fakechain.Faults{}, func(s chain.Source) chain.Source {
+				fs = &failingSource{Source: s}
+				return fs
+			})
+			e.mustHead(t, e.mine("A", 3)[2])
+			a := e.mine("A", 5) // A4…A8
+			before := viewOf(e.tr.State())
+			fs.failAt, fs.n = k, 0
+			got, err := e.finalize(t, a[2])
+			if err == nil || !errors.Is(err, errBoom) {
+				t.Fatalf("err = %v, want boom", err)
+			}
+			e.want(t, got)
+			if calls := strings.Join(e.calls(), " "); calls != strings.Join(healthyCalls[:k], " ") {
+				t.Errorf("calls = %q, want %q", calls, strings.Join(healthyCalls[:k], " "))
+			}
+			e.unchanged(t, before)
+			fs.failAt = 0
+			e.want(t, e.mustFinalize(t, a[2]), e.blk(a[0]), e.blk(a[1]), e.blk(a[2]), e.fin(a[2]))
+		})
+	}
 }
 
 func TestFinalizeAboveTip(t *testing.T) {
 	e := tracked(t, 3)
+	oldWindow := e.refs(1, 3)
 	e.mine("A", 5)
 	a := e.refs(4, 8)
 	got := e.mustFinalize(t, a[2])
@@ -541,12 +599,22 @@ func TestFinalizeAboveTip(t *testing.T) {
 	if st := e.tr.State(); st.Tip() != a[2] || st.Finalized() != a[2] || st.Window() != nil {
 		t.Errorf("state = %+v, want tip and finalized A6, empty window", viewOf(st))
 	}
+
+	// The window is empty and the tip is F, so only the lagging-provider rule ignores these heads:
+	// the blocks of the window before the Finalize, and a sibling of F.
+	sibling := chain.BlockRef{Number: 6, Hash: common.HexToHash("0x66"), Parent: a[1].Hash}
+	for _, h := range append(oldWindow, sibling) {
+		e.want(t, e.mustHead(t, h))
+		e.wantCalls(t, "")
+	}
+
 	e.want(t, e.mustHead(t, a[4]), e.blk(a[3]), e.blk(a[4]))
 }
 
 func TestFinalizeDisagrees(t *testing.T) {
 	e := tracked(t, 6)
 	a3 := e.refs(3, 3)[0]
+	oldWindow := e.refs(1, 5)
 	b := e.reorg("B", 3, 3) // B4…B6
 	got := e.mustFinalize(t, b[1])
 	e.want(t, got, e.rev(a3), e.blk(b[0]), e.blk(b[1]), e.fin(b[1]))
@@ -554,20 +622,27 @@ func TestFinalizeDisagrees(t *testing.T) {
 	if st := e.tr.State(); st.Tip() != b[1] || st.Finalized() != b[1] {
 		t.Errorf("state = %+v, want tip and finalized B5", viewOf(st))
 	}
+	for _, h := range oldWindow {
+		e.want(t, e.mustHead(t, h))
+		e.wantCalls(t, "")
+	}
 	e.want(t, e.mustHead(t, b[2]), e.blk(b[2]))
 
 	c := e.reorg("C", 4, 5) // C3…C7
 	e.src.Do(func(ch *fakechain.Chain) { ch.SetFinalized(4) })
 	e.want(t, e.mustFinalize(t, c[1]))
 
+	before := viewOf(e.tr.State())
 	got, err := e.finalize(t, c[2])
 	wantErr(t, err, tracker.ErrReorgBelowFinalized, "tracker: reorg below the finalized block: finalized block 5 is "+
 		b[1].Hash.Hex()+", got "+c[2].Hash.Hex())
 	e.want(t, got)
 
+	e.unchanged(t, before)
 	got, err = e.finalize(t, c[4])
 	wantErr(t, err, tracker.ErrReorgBelowFinalized, "tracker: reorg below the finalized block: block 6 "+
 		c[3].Hash.Hex()+" does not descend from finalized block 5 "+b[1].Hash.Hex())
 	e.want(t, got)
 	e.wantCalls(t, "H(C6)")
+	e.unchanged(t, before)
 }

@@ -265,6 +265,14 @@ func (e *env) sameState(t *testing.T) {
 	}
 }
 
+// unchanged fails the test unless the tracker's view equals before.
+func (e *env) unchanged(t *testing.T, before view) {
+	t.Helper()
+	if after := viewOf(e.tr.State()); !reflect.DeepEqual(after, before) {
+		t.Errorf("state changed: %+v, want %+v", after, before)
+	}
+}
+
 // refs returns the canonical refs of numbers from..to.
 func (e *env) refs(from, to uint64) []chain.BlockRef {
 	var out []chain.BlockRef

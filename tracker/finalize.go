@@ -37,7 +37,9 @@ func (t *Tracker) Finalize(ctx context.Context, f chain.BlockRef) ([]chainlog.En
 		return nil, fmt.Errorf("%w: finalized block %d is %s, got %s",
 			ErrReorgBelowFinalized, t.fin.Number, t.fin.Hash.Hex(), f.Hash.Hex())
 	}
-	if stored, ok := t.inWindow(f.Hash); ok {
+	// Heights at or below F returned above, so a known ref here is a window ref, or F at a
+	// height it does not have.
+	if stored, ok := t.known(f.Hash); ok {
 		if stored.Number != f.Number {
 			return nil, fmt.Errorf("%w: block %s is at height %d, got %d",
 				ErrInconsistentSource, f.Hash.Hex(), stored.Number, f.Number)
