@@ -1,0 +1,4 @@
+rand.go:9:12: AP2: global randomness: math/rand/v2.IntN is forbidden in apply-path code
+rand.go:10:13: AP2: global randomness: math/rand.Int is forbidden in apply-path code
+rand.go:11:22: AP2: global randomness: math/rand/v2.New is forbidden in apply-path code
+rand.go:11:31: AP2: global randomness: math/rand/v2.NewPCG is forbidden in apply-path code
