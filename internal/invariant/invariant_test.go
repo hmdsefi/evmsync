@@ -508,12 +508,65 @@ func TestScenarioGolden(t *testing.T) {
 		2: {Entries: 682, Blocks: 521, Reverts: 53, MaxRevertDepth: 6, Tolerated: 5, Restarts: 2},
 		3: {Entries: 314, Blocks: 235, Reverts: 55, MaxRevertDepth: 5, Restarts: 4},
 	}
+	logs := map[uint64]string{1: "7f6b4da3a74d4735", 2: "90446bcee516147f", 3: "4889f8cea595adc1"}
 	for seed, w := range want {
 		w.Seed = seed
-		got, err := Check(t, memoryConfig(), seed)
-		if err != nil || got != w {
-			t.Errorf("seed %d: Check = %#v, %v; want %#v", seed, got, err, w)
+		out, err := check(t, memoryConfig(), seed)
+		if err != nil || out.report != w {
+			t.Errorf("seed %d: Check = %#v, %v; want %#v", seed, out.report, err, w)
 		}
+		if got := logFingerprint(out.log); got != logs[seed] {
+			t.Errorf("seed %d: log fingerprint %s, want %s", seed, got, logs[seed])
+		}
+	}
+}
+
+// logFingerprint hashes every entry's kind and block or target ref, so a change to which blocks
+// are appended, reverted or finalized changes it.
+func logFingerprint(es []chainlog.Entry) string {
+	var b bytes.Buffer
+	for _, e := range es {
+		r := e.To
+		if e.Kind == chainlog.KindBlock {
+			r = e.Block.Ref
+		}
+		fmt.Fprintf(&b, "%d %s %v\n", e.Kind, r, e.Final)
+	}
+	h := keccakOf(b.Bytes())
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// scriptedSubject is a memory subject whose Apply always fails and whose Offset reports offs in
+// turn, then the last one.
+type scriptedSubject struct {
+	Subject
+	offs []chainlog.Offset
+}
+
+func (s *scriptedSubject) Offset(context.Context) (chainlog.Offset, error) {
+	off := s.offs[0]
+	if len(s.offs) > 1 {
+		s.offs = s.offs[1:]
+	}
+	return off, nil
+}
+
+func (s *scriptedSubject) Apply(context.Context, chainlog.Entry) error { return errors.New("boom") }
+
+func TestDrainErrors(t *testing.T) {
+	c := fakechain.New(1, fakechain.Params{})
+	lg := chainlog.NewMemory(c.Meta(Filter), 0)
+	if _, err := lg.Append(t.Context(), chainlog.Entry{Kind: chainlog.KindFinalize, To: c.Genesis().Ref}); err != nil {
+		t.Fatal(err)
+	}
+	s := scenarioFor(t, c, lg, nil)
+	// The offset reads 1 after the run, as if Apply had succeeded: only Run's error shows the failure.
+	err := s.drain(lg, &scriptedSubject{NewMemorySubject(), []chainlog.Offset{0, 0, 1}})
+	if want := "run to offset 1: consumer: apply offset 1 (finalize): boom"; err == nil || err.Error() != want {
+		t.Errorf("failing Apply: %v, want %q", err, want)
+	}
+	if err := s.drain(lg, &scriptedSubject{NewMemorySubject(), []chainlog.Offset{1}}); err != nil {
+		t.Errorf("subject at the head: %v, want no run", err)
 	}
 }
 
