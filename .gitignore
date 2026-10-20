@@ -30,11 +30,6 @@ go.work.sum
 *.swo
 *~
 
-# AI coding tools (local settings)
-.cursor/
-.claude/settings.local.json
-.claude/worktrees/
-
 # OS files
 .DS_Store
 Thumbs.db
