@@ -46,15 +46,12 @@ func scanSegment(f *os.File, first chainlog.Offset) (segScan, error) {
 	r := bufio.NewReaderSize(io.NewSectionReader(f, 0, sc.size), scanBuffer)
 	var buf []byte
 	for sc.end < sc.size {
-		rec, err := readRecord(r, &buf)
+		rec, err := readRecord(r, &buf, sc.size-sc.end)
 		if err != nil {
 			return segScan{}, ioErr("read", f.Name(), err)
 		}
 		want := sc.last + 1
-		e, n, err := chainlog.Decode(rec)
-		if err == nil && e.Offset != want {
-			err = fmt.Errorf("offset %d, want %d", e.Offset, want)
-		}
+		n, err := decodeAt(rec, want, nil)
 		if err != nil {
 			declaredEnd := int64(-1)
 			if len(rec) >= recHeader {
@@ -178,7 +175,7 @@ func (l *Log) create(m chainlog.Meta) error {
 	}
 	b := encodeMeta(m)
 	l.meta, _ = decodeMeta(b) // a normalized deep copy; b is valid
-	if err := writeFileAtomic(l.dir, metaName, b, l.sync); err != nil {
+	if err := writeFileAtomic(l.dir, metaName, b, l.fsync); err != nil {
 		return err
 	}
 	return l.createSegment(1)
@@ -192,11 +189,9 @@ func (l *Log) createSegment(first chainlog.Offset) error {
 	if err != nil {
 		return ioErr("open", path, err)
 	}
-	if l.sync {
-		if err := syncDir(l.dir); err != nil {
-			_ = f.Close()
-			return err
-		}
+	if err := syncDir(l.dir, l.fsync); err != nil {
+		_ = f.Close()
+		return err
 	}
 	l.mu.Lock()
 	l.segs = append(l.segs, &segment{name: name, first: first, last: first - 1, f: f})
@@ -290,11 +285,16 @@ func (l *Log) readFile(name string, maxSize uint32) ([]byte, error) {
 		return nil, ioErr("open", path, err)
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, fileHeader+int64(maxSize)+1))
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, ioErr("read", path, err)
 	}
-	return b, nil
+	b := make([]byte, min(fi.Size(), fileHeader+int64(maxSize)+1))
+	n, err := io.ReadFull(f, b)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, ioErr("read", path, err)
+	}
+	return b[:n], nil
 }
 
 // tornTail reports whether the bad record that ends sc's scan of the last segment f is the tail

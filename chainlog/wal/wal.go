@@ -5,7 +5,6 @@ package wal
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -50,7 +49,7 @@ const lockName = "lock"
 // one Log may have a directory open at a time, also across processes.
 type Log struct {
 	dir     string
-	sync    bool
+	fsync   syncer // nil with SyncNever
 	segSize int64
 	logger  *slog.Logger
 	hooks   hooks
@@ -60,7 +59,8 @@ type Log struct {
 	// appendMu serializes Append, Truncate and Close. Their writes to the fields below happen
 	// with mu held as well, so a holder of appendMu may read them without mu.
 	appendMu sync.Mutex
-	buf      []byte // Append's encode buffer; guarded by appendMu
+	buf      []byte  // Append's encode buffer; guarded by appendMu
+	starts   []int64 // the position of each record in buf; guarded by appendMu
 
 	mu           sync.RWMutex
 	segs         []*segment      // in offset order; the last is active; guarded by mu
@@ -100,7 +100,6 @@ func openWithHooks(dir string, opts Options, h hooks) (*Log, error) {
 	}
 	l := &Log{
 		dir:     dir,
-		sync:    opts.Sync == SyncAlways,
 		segSize: opts.SegmentSize,
 		logger:  opts.Logger,
 		hooks:   h,
@@ -108,6 +107,16 @@ func openWithHooks(dir string, opts Options, h hooks) (*Log, error) {
 	}
 	if l.segSize == 0 {
 		l.segSize = DefaultSegmentSize
+	}
+	if opts.Sync == SyncAlways {
+		l.fsync = func(f *os.File) error {
+			if h.sync != nil {
+				if err := h.sync(f.Name()); err != nil {
+					return err
+				}
+			}
+			return f.Sync()
+		}
 	}
 	if l.logger == nil {
 		l.logger = slog.New(slog.DiscardHandler)
@@ -188,9 +197,10 @@ func (l *Log) Append(ctx context.Context, entries ...chainlog.Entry) (chainlog.O
 		return 0, fmt.Errorf("chainlog: append entry %d of %d: %w", i+1, len(entries), err)
 	}
 
-	l.buf = l.buf[:0]
+	l.buf, l.starts = l.buf[:0], l.starts[:0]
 	for i, e := range entries {
 		e.Offset = head + 1 + chainlog.Offset(i) //nolint:gosec // i < len(entries)
+		l.starts = append(l.starts, int64(len(l.buf)))
 		l.buf = chainlog.Encode(l.buf, e)
 	}
 	if err := l.write(head, l.buf); err != nil {
@@ -199,11 +209,15 @@ func (l *Log) Append(ctx context.Context, entries ...chainlog.Entry) (chainlog.O
 		l.mu.Unlock()
 		return 0, fmt.Errorf("%w: append: %w", ErrFailed, err)
 	}
+	return l.publish(head, entries), nil
+}
 
+// publish makes the batch written after offset head visible: it applies the entries to the
+// state, indexes them, moves Head and wakes every Wait. The caller holds appendMu.
+func (l *Log) publish(head chainlog.Offset, entries []chainlog.Entry) chainlog.Offset {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := l.segs[len(l.segs)-1]
-	pos := s.size
 	for i, e := range entries {
 		e.Offset = head + 1 + chainlog.Offset(i) //nolint:gosec // i < len(entries)
 		l.state.Apply(e)
@@ -211,16 +225,15 @@ func (l *Log) Append(ctx context.Context, entries ...chainlog.Entry) (chainlog.O
 			l.lastFin = e.Offset
 		}
 		if (e.Offset-s.first)%indexEvery == 0 {
-			s.index = append(s.index, pos)
+			s.index = append(s.index, s.size+l.starts[i])
 		}
-		pos += int64(recordLen(l.buf[pos-s.size:]))
 	}
-	s.size = pos
+	s.size += int64(len(l.buf))
 	s.last = head + chainlog.Offset(len(entries))
 	l.head = s.last
 	close(l.wake)
 	l.wake = make(chan struct{})
-	return l.head, nil
+	return l.head
 }
 
 // write writes the encoded batch b after offset head to the active segment, rolling to a new
@@ -235,8 +248,8 @@ func (l *Log) write(head chainlog.Offset, b []byte) error {
 	if _, err := l.hooks.writeTo(s.f, b); err != nil {
 		return ioErr("write", s.f.Name(), err)
 	}
-	if l.sync {
-		if err := s.f.Sync(); err != nil {
+	if l.fsync != nil {
+		if err := l.fsync(s.f); err != nil {
 			return ioErr("sync", s.f.Name(), err)
 		}
 	}
@@ -247,7 +260,7 @@ func (l *Log) write(head chainlog.Offset, b []byte) error {
 // the segment for head+1. The caller holds appendMu.
 func (l *Log) roll(head chainlog.Offset) error {
 	cp := encodeCheckpoint(checkpoint{x: head, l: l.lastFin, state: l.state})
-	if err := writeFileAtomic(l.dir, checkpointName, cp, l.sync); err != nil {
+	if err := writeFileAtomic(l.dir, checkpointName, cp, l.fsync); err != nil {
 		return err
 	}
 	if err := l.createSegment(head + 1); err != nil {
@@ -257,51 +270,18 @@ func (l *Log) roll(head chainlog.Offset) error {
 	return nil
 }
 
-// recordLen returns the length of the record at the start of b, which Encode wrote.
-func recordLen(b []byte) int {
-	return recHeader + int(binary.LittleEndian.Uint32(b))
-}
-
 // Read returns up to max entries starting at offset from, in offset order. It returns nil when
 // from is Head+1, an error wrapping chainlog.ErrTruncated when from is below Oldest, and an error
 // wrapping chainlog.ErrAhead when from is above Head+1. A from of 0 reads from 1. It panics if
 // max < 1. A record that fails its checksum is an error wrapping ErrCorrupt.
 func (l *Log) Read(ctx context.Context, from chainlog.Offset, max int) ([]chainlog.Entry, error) {
-	l.mu.RLock()
-	if err := l.check(ctx); err != nil {
-		l.mu.RUnlock()
-		return nil, err
-	}
-	if max < 1 {
-		l.mu.RUnlock()
-		panic("evmsync: chainlog: Read max must be at least 1, got " + strconv.Itoa(max))
-	}
 	if from == 0 {
 		from = 1
 	}
-	switch {
-	case from < l.oldest:
-		defer l.mu.RUnlock()
-		return nil, fmt.Errorf("%w: read from %d, oldest is %d", chainlog.ErrTruncated, from, l.oldest)
-	case from == l.head+1:
-		l.mu.RUnlock()
-		return nil, nil
-	case from > l.head+1:
-		defer l.mu.RUnlock()
-		return nil, fmt.Errorf("%w: read from %d, head is %d", chainlog.ErrAhead, from, l.head)
+	segs, to, err := l.span(ctx, from, max)
+	if len(segs) == 0 {
+		return nil, err
 	}
-	to := l.head
-	if n := uint64(to - from); n >= uint64(max) {
-		to = from + chainlog.Offset(max) - 1 //nolint:gosec // max <= n < head
-	}
-	// Copy the segments that hold from..to, then read without the lock.
-	i := sort.Search(len(l.segs), func(i int) bool { return l.segs[i].last >= from })
-	var segs []segment
-	for ; i < len(l.segs) && l.segs[i].first <= to; i++ {
-		segs = append(segs, *l.segs[i])
-	}
-	l.mu.RUnlock()
-
 	es := make([]chainlog.Entry, 0, to-from+1)
 	for _, s := range segs {
 		start := from
@@ -314,6 +294,37 @@ func (l *Log) Read(ctx context.Context, from chainlog.Offset, max int) ([]chainl
 		}
 	}
 	return es, nil
+}
+
+// span checks a Read from offset from, at least 1, and returns copies of the segments that hold
+// from..to, which Read then reads without the lock. It returns no segment when there is nothing to
+// read.
+func (l *Log) span(ctx context.Context, from chainlog.Offset, max int) ([]segment, chainlog.Offset, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if err := l.check(ctx); err != nil {
+		return nil, 0, err
+	}
+	if max < 1 {
+		panic("evmsync: chainlog: Read max must be at least 1, got " + strconv.Itoa(max))
+	}
+	switch {
+	case from < l.oldest:
+		return nil, 0, fmt.Errorf("%w: read from %d, oldest is %d", chainlog.ErrTruncated, from, l.oldest)
+	case from == l.head+1:
+		return nil, 0, nil
+	case from > l.head+1:
+		return nil, 0, fmt.Errorf("%w: read from %d, head is %d", chainlog.ErrAhead, from, l.head)
+	}
+	to := l.head
+	if n := uint64(to - from); n >= uint64(max) {
+		to = from + chainlog.Offset(max) - 1 //nolint:gosec // max <= n < head
+	}
+	var segs []segment
+	for i := sort.Search(len(l.segs), func(i int) bool { return l.segs[i].last >= from }); i < len(l.segs) && l.segs[i].first <= to; i++ {
+		segs = append(segs, *l.segs[i])
+	}
+	return segs, to, nil
 }
 
 // readError returns the error for a Read from offset from that failed with err. A file closed by
