@@ -46,10 +46,12 @@ type ApplyError struct {
 // Error returns "consumer: apply offset <offset> (<kind>): <Err>", where <kind> is "block",
 // "revert", "finalize" or "kind <n>" for any other value.
 func (e *ApplyError) Error() string {
-	kind := "kind " + strconv.Itoa(int(e.Kind))
+	var kind string
 	switch e.Kind {
 	case chainlog.KindBlock, chainlog.KindRevert, chainlog.KindFinalize:
 		kind = e.Kind.String()
+	default:
+		kind = "kind " + strconv.Itoa(int(e.Kind))
 	}
 	return fmt.Sprintf("consumer: apply offset %d (%s): %v", e.Offset, kind, e.Err)
 }
@@ -67,7 +69,7 @@ const readBatch = 256
 //
 // Run returns an error wrapping ErrAheadOfLog when c's offset is above the log's head, one
 // wrapping both ErrBehindLog and chainlog.ErrTruncated when the log no longer holds the next
-// offset, and one wrapping ErrOffsetGap when the log skips an offset.
+// offset, and one wrapping ErrOffsetGap when the log returns an offset other than the next one.
 func Run(ctx context.Context, log chainlog.Log, c Consumer) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -42,7 +42,6 @@ func TestPurity(t *testing.T) {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	checked := 0
 	for _, name := range names {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -55,13 +54,12 @@ func TestPurity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		checked++
 		for _, finding := range impure(fset, f) {
 			t.Error(finding)
 		}
 	}
-	if !slices.Contains(names, "consumer.go") || checked == 0 {
-		t.Fatalf("checked %d files of %v, want consumer.go among them", checked, names)
+	if !slices.Contains(names, "consumer.go") {
+		t.Fatalf("checked %v, want consumer.go among them", names)
 	}
 }
 
@@ -69,8 +67,14 @@ func TestImpureFindings(t *testing.T) {
 	const src = `package p
 
 import (
+	"fmt"
 	"math/rand"
+	_ "math/rand/v2"
+	_ "net"
 	"net/http"
+	_ "netpkg"
+	_ "os/exec"
+	_ "testing"
 	"time"
 )
 
@@ -82,10 +86,14 @@ func f() { go time.Sleep(0); _ = rand.Int; _ = http.Get }
 		t.Fatal(err)
 	}
 	want := []string{
-		"p.go:4:2: imports math/rand",
-		"p.go:5:2: imports net/http",
-		"p.go:6:2: imports time",
-		"p.go:9:12: go statement",
+		"p.go:5:2: imports math/rand",
+		"p.go:6:2: imports math/rand/v2",
+		"p.go:7:2: imports net",
+		"p.go:8:2: imports net/http",
+		"p.go:10:2: imports os/exec",
+		"p.go:11:2: imports testing",
+		"p.go:12:2: imports time",
+		"p.go:15:12: go statement",
 	}
 	if got := impure(fset, f); !slices.Equal(got, want) {
 		t.Errorf("impure = %q, want %q", got, want)

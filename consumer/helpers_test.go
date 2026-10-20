@@ -5,6 +5,7 @@ package consumer_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -17,7 +18,8 @@ import (
 
 // recorder is a durable test consumer: its fields survive across Run calls, as a database's
 // would. Apply records every call in calls; unless e.Offset is failAt, it then commits: it appends
-// e.Offset to applied and sets off. At failAt it returns failErr and commits nothing.
+// e.Offset to applied and sets off. At failAt it returns failErr and commits nothing. It is not
+// safe for concurrent use: read its fields only after Run returns.
 type recorder struct {
 	off     chainlog.Offset
 	applied []chainlog.Offset
@@ -55,7 +57,9 @@ func (c *canceler) Apply(ctx context.Context, e chainlog.Entry) error {
 
 // countingLog wraps a log and records, for each Read, its max in reads and the number of entries
 // it returned in got, and the after of each Wait in waits. When waiting is not nil, each Wait
-// sends its after on it before waiting, so a test can act once Run is at the tail.
+// sends its after on it before waiting, so a test can act once Run is at the tail. It is not safe
+// for concurrent use: read its fields only after Run returns, and use waiting to act while Run
+// is at the tail.
 type countingLog struct {
 	chainlog.Log
 	reads   []int
@@ -73,6 +77,9 @@ func (l *countingLog) Read(ctx context.Context, from chainlog.Offset, max int) (
 
 func (l *countingLog) Wait(ctx context.Context, after chainlog.Offset) error {
 	l.waits = append(l.waits, after)
+	if ctx.Done() == nil {
+		return errors.New("countingLog: Wait got a context that never ends")
+	}
 	if l.waiting != nil {
 		select {
 		case l.waiting <- after:
