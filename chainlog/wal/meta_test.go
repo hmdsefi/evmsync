@@ -142,31 +142,34 @@ func TestMetaCorrupt(t *testing.T) {
 }
 
 func TestWriteFileAtomic(t *testing.T) {
-	for _, sync := range []bool{false, true} {
+	for _, tt := range []struct {
+		name string
+		sync bool
+	}{{metaName, false}, {checkpointName, true}} {
 		dir := t.TempDir()
-		if err := writeFileAtomic(dir, "meta", []byte("first"), sync); err != nil {
+		if err := writeFileAtomic(dir, tt.name, []byte("first"), tt.sync); err != nil {
 			t.Fatalf("writeFileAtomic: %v", err)
 		}
-		if err := writeFileAtomic(dir, "meta", []byte("second"), sync); err != nil {
+		if err := writeFileAtomic(dir, tt.name, []byte("second"), tt.sync); err != nil {
 			t.Fatalf("writeFileAtomic over an existing file: %v", err)
 		}
-		got, err := os.ReadFile(filepath.Join(dir, "meta"))
+		got, err := os.ReadFile(filepath.Join(dir, tt.name))
 		if err != nil || string(got) != "second" {
-			t.Errorf("sync %v: meta = %q, %v; want \"second\"", sync, got, err)
+			t.Errorf("%s: content %q, %v; want \"second\"", tt.name, got, err)
 		}
-		fi, err := os.Stat(filepath.Join(dir, "meta"))
+		fi, err := os.Stat(filepath.Join(dir, tt.name))
 		if err != nil {
 			t.Fatalf("Stat: %v", err)
 		}
 		if mode := fi.Mode().Perm(); mode != 0o600 {
-			t.Errorf("sync %v: mode %v, want 0600", sync, mode)
+			t.Errorf("%s: mode %v, want 0600", tt.name, mode)
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
 		if len(entries) != 1 {
-			t.Errorf("sync %v: directory holds %v, want only meta", sync, entries)
+			t.Errorf("%s: directory holds %v, want only the file", tt.name, entries)
 		}
 	}
 
