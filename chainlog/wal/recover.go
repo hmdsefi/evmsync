@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -144,7 +145,8 @@ func (l *Log) load(opts Options) (created bool, err error) {
 		}
 		l.checkpointAt = cp.x
 	}
-	if err := l.openSegments(d.segments); err != nil {
+	cut, err := l.openSegments(d.segments)
+	if err != nil {
 		return false, err
 	}
 
@@ -155,6 +157,11 @@ func (l *Log) load(opts Options) (created bool, err error) {
 		}
 	} else if f0 != 1 {
 		return false, fmt.Errorf("%w: first segment starts at %d without a checkpoint", ErrCorrupt, f0)
+	}
+	if cut != nil {
+		if err := cut(); err != nil {
+			return false, err
+		}
 	}
 	l.state, l.lastFin = cp.state, cp.l
 	if err := l.replay(cp.x+1, h); err != nil {
@@ -198,16 +205,18 @@ func (l *Log) createSegment(first chainlog.Offset) error {
 	return nil
 }
 
-// openSegments opens and scans the segments, in order, and checks that they fit together.
-func (l *Log) openSegments(names []string) error {
+// openSegments opens and scans the segments, in order, and checks that they fit together. A torn
+// tail of the last segment is not cut yet: it returns the cut, which load runs only once the
+// checkpoint agrees with the segments, so a failed Open changes no file.
+func (l *Log) openSegments(names []string) (cut func() error, err error) {
 	for i, name := range names {
 		first, _ := parseSegmentName(name)
 		if i > 0 {
 			if prev := l.segs[i-1].last; first != prev+1 {
-				return fmt.Errorf("%w: segment %s does not follow offset %d", ErrCorrupt, name, prev)
+				return nil, fmt.Errorf("%w: segment %s does not follow offset %d", ErrCorrupt, name, prev)
 			}
 		} else if first == 0 {
-			return fmt.Errorf("%w: segment %s does not follow offset 0", ErrCorrupt, name)
+			return nil, fmt.Errorf("%w: segment %s does not follow offset 0", ErrCorrupt, name)
 		}
 		active := i == len(names)-1
 		flag := os.O_RDONLY
@@ -217,23 +226,32 @@ func (l *Log) openSegments(names []string) error {
 		path := filepath.Join(l.dir, name)
 		f, err := os.OpenFile(path, flag, 0) //nolint:gosec // a segment name the WAL owns
 		if err != nil {
-			return ioErr("open", path, err)
+			return nil, ioErr("open", path, err)
 		}
 		s := &segment{name: name, first: first, f: f}
 		l.segs = append(l.segs, s)
 		sc, err := scanSegment(f, first)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if sc.bad != nil {
-			return fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, name, sc.bad.pos, sc.bad.err)
+			torn := false
+			if active {
+				if torn, err = tornTail(f, sc); err != nil {
+					return nil, err
+				}
+			}
+			if !torn {
+				return nil, fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, name, sc.bad.pos, sc.bad.err)
+			}
+			cut = func() error { return l.cutTail(f, name, sc) }
 		}
 		if !active && sc.last < sc.first {
-			return fmt.Errorf("%w: segment %s is empty", ErrCorrupt, name)
+			return nil, fmt.Errorf("%w: segment %s is empty", ErrCorrupt, name)
 		}
 		s.last, s.size, s.index = sc.last, sc.end, sc.index
 	}
-	return nil
+	return cut, nil
 }
 
 // replay applies the entries from..to to l.state, as they follow the checkpoint, and records
@@ -283,4 +301,51 @@ func (l *Log) readFile(name string, maxSize uint32) ([]byte, error) {
 		return nil, ioErr("read", path, err)
 	}
 	return b[:n], nil
+}
+
+// tornTail reports whether the bad record that ends sc's scan of the last segment f is the tail
+// of an interrupted write rather than corruption: fewer than 8 bytes remain, the record's
+// declared end is at or past the end of the file, or every byte from it on is zero. A bad record
+// whose declared end lies inside the file and is followed by more data is corruption, so the WAL
+// does not drop the records after it. (A damaged length field that points past the end of the
+// file looks like a torn write; the checkpoint check that runs before the cut catches the case
+// where that would drop records the checkpoint covers.)
+func tornTail(f *os.File, sc segScan) (bool, error) {
+	p := sc.bad.pos
+	if sc.bad.declaredEnd < 0 || sc.bad.declaredEnd >= sc.size {
+		return true, nil
+	}
+	buf := make([]byte, readBuffer)
+	for p < sc.size {
+		n, err := f.ReadAt(buf[:min(int64(len(buf)), sc.size-p)], p)
+		if err != nil {
+			return false, ioErr("read", f.Name(), err)
+		}
+		for _, b := range buf[:n] {
+			if b != 0 {
+				return false, nil
+			}
+		}
+		p += int64(n)
+	}
+	return true, nil
+}
+
+// cutTail truncates the last segment f to the end of its last whole record.
+func (l *Log) cutTail(f *os.File, name string, sc segScan) error {
+	if err := f.Truncate(sc.bad.pos); err != nil {
+		return ioErr("truncate", f.Name(), err)
+	}
+	// Logged before the fsync: the bytes are gone even if the fsync fails.
+	l.logger.Warn("wal torn tail cut",
+		slog.String("segment", name),
+		slog.Int64("position", sc.bad.pos),
+		slog.Int64("bytes", sc.size-sc.bad.pos),
+	)
+	if l.fsync != nil {
+		if err := l.fsync(f); err != nil {
+			return ioErr("sync", f.Name(), err)
+		}
+	}
+	return nil
 }
