@@ -32,12 +32,16 @@ type Options struct {
 	Meta        chainlog.Meta // used only when the directory is new
 	SegmentSize int64         // roll threshold in bytes; 0 means 64 MiB
 	Sync        SyncPolicy    // default SyncAlways
-	WindowCap   int           // 0 means chainlog.DefaultWindowCap (100,000)
+	WindowCap   int           // 0 means chainlog.DefaultWindowCap (100,000); at most MaxWindowCap
 	Logger      *slog.Logger  // nil discards
 }
 
 // DefaultSegmentSize is the SegmentSize used when Options.SegmentSize is 0.
 const DefaultSegmentSize = 64 << 20
+
+// MaxWindowCap is the largest Options.WindowCap. The checkpoint holds the window, and a window of
+// this many refs still fits the checkpoint's 1 GiB limit.
+const MaxWindowCap = 10_000_000
 
 const lockName = "lock"
 
@@ -91,6 +95,8 @@ func openWithHooks(dir string, opts Options, h hooks) (*Log, error) {
 		return nil, fmt.Errorf("wal: invalid options: unknown sync policy %d", opts.Sync)
 	case opts.WindowCap < 0:
 		return nil, fmt.Errorf("wal: invalid options: window cap %d is negative", opts.WindowCap)
+	case opts.WindowCap > MaxWindowCap:
+		return nil, fmt.Errorf("wal: invalid options: window cap %d is above %d", opts.WindowCap, MaxWindowCap)
 	}
 	l := &Log{
 		dir:     dir,
@@ -107,7 +113,7 @@ func openWithHooks(dir string, opts Options, h hooks) (*Log, error) {
 		l.logger = slog.New(slog.DiscardHandler)
 	}
 	if err := os.MkdirAll(dir, dirMode); err != nil { //nolint:gosec // dir is the directory the caller chose for the log
-		return nil, fmt.Errorf("wal: open %s: %w", dir, err)
+		return nil, ioErr("open", dir, err)
 	}
 	lock, err := lockFile(filepath.Join(dir, lockName))
 	if errors.Is(err, errWouldBlock) {
@@ -231,7 +237,7 @@ func (l *Log) write(head chainlog.Offset, b []byte) error {
 	}
 	if l.sync {
 		if err := s.f.Sync(); err != nil {
-			return fmt.Errorf("wal: sync %s: %w", s.f.Name(), err)
+			return ioErr("sync", s.f.Name(), err)
 		}
 	}
 	return nil
@@ -424,11 +430,11 @@ func (l *Log) closeFiles() error {
 	var errs []error
 	for _, s := range l.segs {
 		if err := s.f.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("wal: write %s: %w", s.f.Name(), err))
+			errs = append(errs, ioErr("write", s.f.Name(), err))
 		}
 	}
 	if err := l.lock.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("wal: write %s: %w", l.lock.Name(), err))
+		errs = append(errs, ioErr("write", l.lock.Name(), err))
 	}
 	return errors.Join(errs...)
 }
