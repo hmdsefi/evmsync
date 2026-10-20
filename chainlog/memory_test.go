@@ -109,7 +109,9 @@ func TestMemoryClosedReleases(t *testing.T) {
 	}
 }
 
-// TestAppendCostFlat compares the cost of Append with a window of 99,000 refs and of 10 refs.
+// TestAppendCostFlat compares the cost of Append with a window of 99,000 refs and of 10 refs. Each
+// of the 1,000 steps appends a block and a Finalize of the window's first ref, so the window keeps
+// its length.
 func TestAppendCostFlat(t *testing.T) {
 	if raceEnabled {
 		t.Skip("the race detector distorts the timing")

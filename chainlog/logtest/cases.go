@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hmdsefi/evmsync/chain"
 	"github.com/hmdsefi/evmsync/chainlog"
@@ -259,7 +260,7 @@ func testRoundTrip(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 		block(b101),
 		{Kind: chainlog.KindBlock, Block: chain.Block{Ref: b102, Logs: []chain.Log{logOf(b102, 0, 4, 300, false)}}},
 		{Kind: chainlog.KindBlock, Block: chain.Block{Ref: b103, Logs: []chain.Log{
-			logOf(b103, 0, 0, 0, true), logOf(b103, 1, 1, 1, false), logOf(b103, 5, 3, 0, false),
+			logOf(b103, 0, 0, 0, true), logOf(b103, 1, 1, 1, false), logOf(b103, 3, 2, 7, false), logOf(b103, 5, 3, 0, false),
 		}}},
 		revert(b102),
 		finalize(b101),
@@ -267,7 +268,7 @@ func testRoundTrip(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 	appendOK(t, l, in...)
 
 	want := numbered(in...)
-	want[2].Block.Logs = []chain.Log{logOf(b103, 0, 0, 0, false), logOf(b103, 1, 1, 1, false), logOf(b103, 5, 3, 0, false)}
+	want[2].Block.Logs = []chain.Log{logOf(b103, 0, 0, 0, false), logOf(b103, 1, 1, 1, false), logOf(b103, 3, 2, 7, false), logOf(b103, 5, 3, 0, false)}
 	got := read(t, l, 1, 10)
 	wantEntries(t, got, want)
 	l0 := got[2].Block.Logs[0]
@@ -460,14 +461,14 @@ func testBatchAtomic(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 func testStateCopy(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 	appendOK(t, l, blocks(101, 103)...)
 	want := view{tip: blk(103, 0), win: refs(blk(101, 0), blk(102, 0), blk(103, 0))}
+	// The revert first: the block then writes into whatever array the copy's window shares.
 	s := state(t, l)
-	s.Apply(block(blk(104, 0)))
 	s.Apply(revert(blk(101, 0)))
 	s.Apply(block(blk(102, 3)))
 	w := state(t, l).Window()
-	for i := range w {
-		w[i] = chain.BlockRef{}
-	}
+	w[0] = chain.BlockRef{}
+	w = append(w, blk(9, 9))
+	w[1] = w[len(w)-1]
 	wantView(t, l, want)
 }
 
@@ -476,27 +477,70 @@ func testWait(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 	appendOK(t, l, blocks(101, 102)...)
 	eq(t, "Wait(1) with Head 2", l.Wait(ctx, 1), error(nil))
 
-	done := make(chan error, 1)
-	go func() { done <- l.Wait(ctx, 2) }()
-	eq(t, "results of Wait(2) before an Append", len(done), 0)
+	done := blockedWait(t, l, ctx, 2)
 	appendOK(t, l, block(blk(103, 0)))
-	eq(t, "Wait(2) after an Append", <-done, error(nil))
+	eq(t, "blocked Wait(2) after an Append", receive(t, done, "Wait(2)"), error(nil))
 
 	cctx, cancel := context.WithCancel(ctx)
-	go func() { done <- l.Wait(cctx, 3) }()
+	done = blockedWait(t, l, cctx, 3)
 	cancel()
-	wantErr(t, "Wait after cancel", <-done, context.Canceled, "")
+	wantErr(t, "blocked Wait(3) after cancel", receive(t, done, "Wait(3)"), context.Canceled, "")
 
 	wantErr(t, "Wait(10) with Head 3", l.Wait(ctx, 10), chainlog.ErrAhead, "chainlog: offset beyond head: wait after 10, head is 3")
 
 	const waiters = 16
-	results := make(chan error, waiters)
-	for range waiters {
-		go func() { results <- l.Wait(ctx, 3) }()
+	results := make([]<-chan error, waiters)
+	for i := range results {
+		results[i] = blockedWait(t, l, ctx, 3)
 	}
 	appendOK(t, l, block(blk(104, 0)))
-	for range waiters {
-		eq(t, "waiter", <-results, error(nil))
+	for _, done := range results {
+		eq(t, "blocked waiter after one Append", receive(t, done, "Wait(3)"), error(nil))
+	}
+}
+
+// waitLimit bounds every wait of the suite, so a broken log fails a subtest instead of hanging.
+const waitLimit = 30 * time.Second
+
+// signalCtx is a context that reports, once, that a caller asked for its Done channel. A Wait that
+// blocks asks for it.
+type signalCtx struct {
+	context.Context
+	asked chan struct{}
+	once  sync.Once
+}
+
+func (c *signalCtx) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.asked) })
+	return c.Context.Done()
+}
+
+// blockedWait starts Wait(ctx, after) and returns its result channel once Wait is blocked, that
+// is, once it asked for ctx.Done.
+func blockedWait(t *testing.T, l chainlog.Log, ctx context.Context, after chainlog.Offset) <-chan error {
+	t.Helper()
+	sc := &signalCtx{Context: ctx, asked: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- l.Wait(sc, after) }()
+	select {
+	case <-sc.asked:
+	case err := <-done:
+		t.Fatalf("Wait(%d) returned %v instead of blocking", after, err)
+	case <-time.After(waitLimit):
+		t.Fatalf("Wait(%d) neither blocked nor returned within %v", after, waitLimit)
+	}
+	return done
+}
+
+// receive returns the result of a waiter, failing the test when it takes longer than waitLimit.
+func receive(t *testing.T, done <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(waitLimit):
+		t.Fatalf("%s did not return within %v", what, waitLimit)
+		return nil
 	}
 }
 
@@ -542,14 +586,18 @@ func testTruncateBound(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 func testClosed(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 	ctx := t.Context()
 	appendOK(t, l, block(blk(101, 0)))
-	done := make(chan error, 1)
-	go func() { done <- l.Wait(ctx, 1) }()
-	eq(t, "results of Wait(1) before Close", len(done), 0)
+	done := blockedWait(t, l, ctx, 1)
 	noErr(t, l.Close(), "Close")
 	// The contract returns ErrClosed unwrapped, so compare with ==.
-	eq(t, "Wait blocked before Close returns ErrClosed", <-done == chainlog.ErrClosed, true)
+	eq(t, "Wait blocked before Close returns ErrClosed", receive(t, done, "Wait(1)") == chainlog.ErrClosed, true)
 	for name, err := range calls(ctx, l) {
 		eq(t, name+" after Close returns ErrClosed", err == chainlog.ErrClosed, true)
+	}
+	// Closed comes before a cancelled context and before the arguments.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	for name, err := range calls(cancelled, l) {
+		eq(t, name+" after Close with a cancelled context returns ErrClosed", err == chainlog.ErrClosed, true)
 	}
 	eq(t, "second Close", l.Close(), error(nil))
 }
@@ -584,8 +632,34 @@ func calls(ctx context.Context, l chainlog.Log) func(yield func(string, error) b
 		if !yield("State", err) {
 			return
 		}
-		yield("Truncate", l.Truncate(ctx, 1))
+		if !yield("Truncate", l.Truncate(ctx, 1)) {
+			return
+		}
+		// Arguments are checked after the closed log and the context.
+		_, err = l.Append(ctx)
+		if !yield("Append()", err) {
+			return
+		}
+		_, err = l.Append(ctx, chainlog.Entry{})
+		if !yield("Append(malformed)", err) {
+			return
+		}
+		if !yield("Wait(99)", l.Wait(ctx, 99)) {
+			return
+		}
+		yield("Read(1, 0)", readRecovered(ctx, l))
 	}
+}
+
+// readRecovered calls Read(ctx, 1, 0) and turns its panic into an error.
+func readRecovered(ctx context.Context, l chainlog.Log) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	_, err = l.Read(ctx, 1, 0)
+	return err
 }
 
 func testCancelledContext(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
@@ -637,7 +711,17 @@ func testConcurrent(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 			break
 		}
 	}
-	wg.Wait()
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(waitLimit):
+		cancel()
+		t.Fatalf("readers did not finish within %v", waitLimit)
+	}
 	noErr(t, appendErr, "Append")
 	for r := range readers {
 		noErr(t, errs[r], "reader")
@@ -677,7 +761,11 @@ func testBatchVisibility(t *testing.T, l chainlog.Log, _ func() chainlog.Log) {
 		appended <- nil
 	}()
 	var inside chainlog.Offset // a Head that is not a multiple of 3, if any
+	deadline := time.Now().Add(waitLimit)
 	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("Head did not reach %d within %v", 3*batches, waitLimit)
+		}
 		h, err := l.Head(ctx)
 		noErr(t, err, "Head")
 		if h%3 != 0 {
