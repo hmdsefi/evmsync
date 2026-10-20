@@ -6,11 +6,13 @@ package wal
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/chainlog"
@@ -228,7 +230,11 @@ func TestTruncateConcurrentRead(t *testing.T) {
 					errs[r] = err
 					return
 				}
-				for _, e := range got {
+				for i, e := range got {
+					if e.Offset != o+chainlog.Offset(i) { //nolint:gosec // i < 64
+						errs[r] = errors.New("Read returned offsets that are not contiguous from its start")
+						return
+					}
 					if !reflect.DeepEqual(chainlog.Encode(nil, e), want[e.Offset-1]) {
 						errs[r] = errors.New("an entry read differs from the one appended")
 						return
@@ -289,6 +295,10 @@ func TestCompactionBound(t *testing.T) {
 		t.Fatalf("Truncate(%d): %v", firsts[2]-1, err)
 	}
 	wantSame(t, "segments after Truncate at a segment's last offset", segmentNames(t, dir), names[1:])
+	first, _ := os.ReadFile(filepath.Join(dir, checkpointName))
+	if cp, err := decodeCheckpoint(first, 0); err != nil || cp.l != bound-1 {
+		t.Errorf("checkpoint after the first Truncate: l %d, %v; want the last finalize %d", cp.l, err, bound-1)
+	}
 
 	// A caller bound at a segment's first offset keeps that segment and drops the ones before.
 	keep := firsts[2]
@@ -357,5 +367,83 @@ func TestCompactionOrder(t *testing.T) {
 	wantSame(t, "fsyncs and deletions of a compaction", events, want)
 	if _, err := firstFile.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("a dropped segment's file reads %v, want os.ErrClosed", err)
+	}
+}
+
+// TestCompactionRemoveFailure fails the deletion of the oldest segment: Truncate reports it, and
+// no later segment is deleted until a later Truncate deletes that one, so the directory never has
+// a gap that Open would reject.
+func TestCompactionRemoveFailure(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	fail := true
+	h := hooks{remove: func(path string) error {
+		if fail && filepath.Base(path) == firstSegment {
+			return syscall.EBUSY
+		}
+		return os.Remove(path)
+	}}
+	l := openLog(t, dir, compactOpts(512, SyncNever), h)
+	for _, e := range finalizedBlocks(60) {
+		mustAppend(t, l, e)
+	}
+	names := segmentNames(t, dir)
+	want := "wal: remove " + filepath.Join(dir, firstSegment) + ": " + syscall.EBUSY.Error()
+	if err := l.Truncate(ctx, 1000); err == nil || err.Error() != want {
+		t.Fatalf("Truncate with a failing deletion = %v, want %q", err, want)
+	}
+	wantSame(t, "segments after the failed deletion", segmentNames(t, dir), names)
+
+	// More segments become deletable, but the stuck file still goes first.
+	mustAppend(t, l, linkedBlocks(61, 20, 40)...)
+	mustAppend(t, l, finalizeTo(ref(80)))
+	if err := l.Truncate(ctx, 1000); err == nil || err.Error() != want {
+		t.Fatalf("Truncate while the deletion still fails = %v, want %q", err, want)
+	}
+	if got := segmentNames(t, dir); got[0] != firstSegment || len(got) < len(names) {
+		t.Errorf("segments while the deletion fails = %v, want none deleted", got)
+	}
+	copied := copyDir(t, dir)
+	reopened, err := Open(copied, compactOpts(512, SyncNever))
+	if err != nil {
+		t.Fatalf("Open of the directory while the deletion fails: %v", err)
+	}
+	_ = reopened.Close()
+
+	fail = false
+	if err := l.Truncate(ctx, 1000); err != nil {
+		t.Fatalf("Truncate once the deletion works: %v", err)
+	}
+	got := segmentNames(t, dir)
+	if got[0] == firstSegment {
+		t.Errorf("the stuck segment is still on disk: %v", got)
+	}
+	first, _ := parseSegmentName(got[0])
+	if o, _ := l.Oldest(ctx); o != first {
+		t.Errorf("Oldest = %d, want the first segment on disk %d", o, first)
+	}
+	before := snap(t, l)
+	mustClose(t, l)
+	l = openLog(t, dir, compactOpts(512, SyncNever), hooks{})
+	wantSame(t, "log after reopen", snap(t, l), before)
+}
+
+// TestCompactionNothingToDelete truncates a log whose only segment is the active one: nothing is
+// deleted and no checkpoint is written.
+func TestCompactionNothingToDelete(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	l := openLog(t, dir, compactOpts(0, SyncNever), hooks{})
+	for _, e := range finalizedBlocks(20) {
+		mustAppend(t, l, e)
+	}
+	if err := l.Truncate(ctx, 1000); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, checkpointName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a Truncate that deletes nothing wrote a checkpoint: %v", err)
+	}
+	if o, _ := l.Oldest(ctx); o != 1 {
+		t.Errorf("Oldest = %d, want 1", o)
 	}
 }
