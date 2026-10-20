@@ -7,7 +7,6 @@ package wal
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"syscall"
 )
@@ -20,14 +19,14 @@ var errWouldBlock = errors.New("lock held")
 func lockFile(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode) //nolint:gosec // path is the log's own lock file
 	if err != nil {
-		return nil, fmt.Errorf("wal: open %s: %w", path, err)
+		return nil, ioErr("open", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { //nolint:gosec // a file descriptor fits an int
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, errWouldBlock
 		}
-		return nil, fmt.Errorf("wal: lock %s: %w", path, err)
+		return nil, ioErr("lock", path, err)
 	}
 	return f, nil
 }

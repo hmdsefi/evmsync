@@ -43,6 +43,7 @@ func TestOpenOptions(t *testing.T) {
 		{Options{SegmentSize: -1}, "wal: invalid options: segment size -1 is negative"},
 		{Options{Sync: 2}, "wal: invalid options: unknown sync policy 2"},
 		{Options{WindowCap: -1}, "wal: invalid options: window cap -1 is negative"},
+		{Options{WindowCap: MaxWindowCap + 1}, "wal: invalid options: window cap 10000001 is above 10000000"},
 	}
 	for _, tt := range tests {
 		dir := filepath.Join(t.TempDir(), "wal")
@@ -222,6 +223,9 @@ func TestMetaCorruptOpen(t *testing.T) {
 		}, "filter out of range"},
 		{"trailing byte", func(dir string) {
 			rewrite(t, dir, "meta", func(b []byte) []byte { return seal(cat(b[8:], []byte{0x00})) })
+		}, "trailing bytes"},
+		{"3 MiB after the meta", func(dir string) {
+			rewrite(t, dir, "meta", func(b []byte) []byte { return append(b, make([]byte, 3<<20)...) })
 		}, "trailing bytes"},
 	}
 	for _, tt := range tests {

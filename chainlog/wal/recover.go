@@ -40,7 +40,7 @@ type badRecord struct {
 func scanSegment(f *os.File, first chainlog.Offset) (segScan, error) {
 	fi, err := f.Stat()
 	if err != nil {
-		return segScan{}, fmt.Errorf("wal: read %s: %w", f.Name(), err)
+		return segScan{}, ioErr("read", f.Name(), err)
 	}
 	sc := segScan{first: first, last: first - 1, size: fi.Size()}
 	r := bufio.NewReaderSize(io.NewSectionReader(f, 0, sc.size), scanBuffer)
@@ -48,7 +48,7 @@ func scanSegment(f *os.File, first chainlog.Offset) (segScan, error) {
 	for sc.end < sc.size {
 		rec, err := readRecord(r, &buf)
 		if err != nil {
-			return segScan{}, fmt.Errorf("wal: read %s: %w", f.Name(), err)
+			return segScan{}, ioErr("read", f.Name(), err)
 		}
 		want := sc.last + 1
 		e, n, err := chainlog.Decode(rec)
@@ -83,12 +83,12 @@ func (l *Log) list() (dirListing, error) {
 	for _, tmp := range []string{metaName + ".tmp", checkpointName + ".tmp"} {
 		path := filepath.Join(l.dir, tmp)
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return dirListing{}, fmt.Errorf("wal: remove %s: %w", path, err)
+			return dirListing{}, ioErr("remove", path, err)
 		}
 	}
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		return dirListing{}, fmt.Errorf("wal: read %s: %w", l.dir, err)
+		return dirListing{}, ioErr("read", l.dir, err)
 	}
 	var d dirListing
 	for _, e := range entries {
@@ -122,7 +122,7 @@ func (l *Log) load(opts Options) (created bool, err error) {
 	if !d.meta {
 		return false, fmt.Errorf("%w: meta: missing", ErrCorrupt)
 	}
-	b, err := l.readFile(metaName)
+	b, err := l.readFile(metaName, maxMetaSize)
 	if err != nil {
 		return false, err
 	}
@@ -139,7 +139,7 @@ func (l *Log) load(opts Options) (created bool, err error) {
 
 	cp := checkpoint{state: chainlog.NewState(opts.WindowCap)}
 	if d.checkpoint {
-		b, err := l.readFile(checkpointName)
+		b, err := l.readFile(checkpointName, maxCheckpointSize)
 		if err != nil {
 			return false, err
 		}
@@ -190,7 +190,7 @@ func (l *Log) createSegment(first chainlog.Offset) error {
 	path := filepath.Join(l.dir, name)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, fileMode) //nolint:gosec // a segment name the WAL makes
 	if err != nil {
-		return fmt.Errorf("wal: open %s: %w", path, err)
+		return ioErr("open", path, err)
 	}
 	if l.sync {
 		if err := syncDir(l.dir); err != nil {
@@ -223,7 +223,7 @@ func (l *Log) openSegments(names []string) error {
 		path := filepath.Join(l.dir, name)
 		f, err := os.OpenFile(path, flag, 0) //nolint:gosec // a segment name the WAL owns
 		if err != nil {
-			return fmt.Errorf("wal: open %s: %w", path, err)
+			return ioErr("open", path, err)
 		}
 		s := &segment{name: name, first: first, f: f}
 		l.segs = append(l.segs, s)
@@ -281,11 +281,18 @@ func (l *Log) replay(from, to chainlog.Offset) error {
 	return nil
 }
 
-func (l *Log) readFile(name string) ([]byte, error) {
+// readFile reads the meta or checkpoint file name, at most the 8-byte header, a body of maxSize
+// bytes and one byte more: enough for the decoder to report a file that is too long.
+func (l *Log) readFile(name string, maxSize uint32) ([]byte, error) {
 	path := filepath.Join(l.dir, name)
-	b, err := os.ReadFile(path) //nolint:gosec // a file name the WAL owns
+	f, err := os.Open(path) //nolint:gosec // a file name the WAL owns
 	if err != nil {
-		return nil, fmt.Errorf("wal: read %s: %w", path, err)
+		return nil, ioErr("open", path, err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, fileHeader+int64(maxSize)+1))
+	if err != nil {
+		return nil, ioErr("read", path, err)
 	}
 	return b, nil
 }

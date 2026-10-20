@@ -103,7 +103,7 @@ func (s segment) readRange(from, to chainlog.Offset, fn func(chainlog.Entry)) er
 	for ; off <= to; off++ {
 		rec, err := readRecord(r, &buf)
 		if err != nil {
-			return fmt.Errorf("wal: read %s: %w", s.f.Name(), err)
+			return ioErr("read", s.f.Name(), err)
 		}
 		e, n, err := chainlog.Decode(rec)
 		if err != nil {
