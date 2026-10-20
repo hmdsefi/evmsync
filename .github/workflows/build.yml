@@ -1,0 +1,80 @@
+name: build
+on: [ push, pull_request ]
+permissions:
+  contents: read
+jobs:
+  golangci:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+
+  build:
+    name: Go build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable # the test job covers the minimum version in go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+        run: go build -v ./...
+
+  test:
+    name: Go test
+    runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.total-coverage }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      - name: Check coverage
+        id: coverage
+        uses: vladopajic/go-test-coverage@f94bcf0d6b9fa5fb8b783830b22648f6c17475e2 # v2.19.0
+        with:
+          config: ./.testcoverage.yml
+
+      - name: Coverage summary
+        if: ${{ !cancelled() && steps.coverage.outputs.report != '' }}
+        env:
+          REPORT: ${{ fromJSON(steps.coverage.outputs.report) }}
+        run: |
+          {
+            echo '```'
+            echo "$REPORT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  coverage-badge:
+    name: Coverage badge
+    needs: test
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # the README coverage badge shows the title of issue #95
+    steps:
+      - name: Update coverage badge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COVERAGE: ${{ needs.test.outputs.coverage }}
+        run: |
+          test -n "$COVERAGE"
+          title="$COVERAGE%"
+          current=$(gh issue view 95 --repo "$GITHUB_REPOSITORY" --json title --jq .title)
+          if [ "$current" != "$title" ]; then
+            gh issue edit 95 --repo "$GITHUB_REPOSITORY" --title "$title"
+          fi

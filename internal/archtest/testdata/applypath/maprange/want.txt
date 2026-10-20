@@ -1,0 +1,3 @@
+maprange.go:7:2: AP4: range over map map[int]int has random order; range over sorted keys or annotate //evmsync:maporder <reason>
+maprange.go:17:2: AP4: range over map M has random order; range over sorted keys or annotate //evmsync:maporder <reason>
+maprange.go:22:2: AP4: range over map T has random order; range over sorted keys or annotate //evmsync:maporder <reason>
