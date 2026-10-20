@@ -130,14 +130,19 @@ func snap(s State) snapshot {
 }
 
 func TestNewState(t *testing.T) {
-	for name, s := range map[string]State{"NewState(0)": NewState(0), "State{}": {}, "NewState(5)": NewState(5)} {
-		t.Run(name, func(t *testing.T) {
-			wantState(t, s, chain.BlockRef{}, chain.BlockRef{}, nil)
+	type named struct {
+		name string
+		s    State
+	}
+	for _, tt := range []named{{"NewState(0)", NewState(0)}, {"State{}", State{}}, {"NewState(5)", NewState(5)}} {
+		t.Run(tt.name, func(t *testing.T) {
+			wantState(t, tt.s, chain.BlockRef{}, chain.BlockRef{}, nil)
 		})
 	}
 
-	for name, s := range map[string]State{"NewState(0)": NewState(0), "State{}": {}} {
-		t.Run(name+" cap", func(t *testing.T) {
+	for _, tt := range []named{{"NewState(0)", NewState(0)}, {"State{}", State{}}} {
+		s := tt.s
+		t.Run(tt.name+" cap", func(t *testing.T) {
 			for n := uint64(1); n <= DefaultWindowCap; n++ {
 				e := block(blk(n, 0))
 				if err := s.Check(e); err != nil {
@@ -413,6 +418,13 @@ func TestSize(t *testing.T) {
 	}
 	var empty State
 	wantPass(t, &empty, sized(MaxRecordSize-200))
+
+	// The size rule comes after the shape rules and before the block rules.
+	misnumbered := sized(MaxRecordSize)
+	misnumbered.Block.Logs[0].BlockNumber = 8
+	wantMalformed(t, empty.Check(misnumbered), "block 7: log 0: block number 8")
+	afterSeven := build(t, 0, block(blk(7, 0)))
+	wantMalformed(t, afterSeven.Check(sized(MaxRecordSize)), "block 7: record body of "+strconv.Itoa(bodySize(sized(MaxRecordSize)))+" bytes exceeds 16777216")
 	tooBig := sized(MaxRecordSize)
 	wantMalformed(t, empty.Check(tooBig), "block 7: record body of "+strconv.Itoa(bodySize(tooBig))+" bytes exceeds 16777216")
 
@@ -496,6 +508,54 @@ func TestApplySequence(t *testing.T) {
 	}
 }
 
+// TestCheckedWalk applies a seeded walk of entries that pass Check and checks the invariants and
+// the binary round trip after each one.
+func TestCheckedWalk(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // a seeded, reproducible sequence, not a secret
+	s := NewState(16)
+	applied := 0
+	for range 20_000 {
+		e := randomEntry(r, s)
+		if s.Check(e) != nil {
+			continue
+		}
+		s.Apply(e)
+		applied++
+		wantInvariants(t, s)
+		b, _ := s.MarshalBinary()
+		u := NewState(16)
+		if err := u.UnmarshalBinary(b); err != nil {
+			t.Fatalf("after %d entries: UnmarshalBinary: %v", applied, err)
+		}
+		if !reflect.DeepEqual(snap(u), snap(s)) {
+			t.Fatalf("after %d entries: round trip %+v, want %+v", applied, snap(u), snap(s))
+		}
+	}
+	if applied < 1000 {
+		t.Errorf("only %d of 20,000 drawn entries passed Check, want at least 1,000", applied)
+	}
+}
+
+// randomEntry draws an entry near s's tip: a block on one of three forks, or a revert or finalize
+// whose target is a window ref half the time.
+func randomEntry(r *rand.Rand, s State) Entry {
+	forks := [...]byte{0, 1, 2}
+	tip := s.Tip()
+	n := tip.Number + r.Uint64N(3)
+	ref := chain.BlockRef{Number: n, Hash: h(n, forks[r.IntN(3)]), Parent: tip.Hash, Time: 12 * n}
+	if w := s.Window(); len(w) > 0 && r.IntN(2) == 0 {
+		ref = w[r.IntN(len(w))]
+	}
+	switch r.IntN(4) {
+	case 0:
+		return revert(ref)
+	case 1:
+		return finalize(ref)
+	default:
+		return Entry{Kind: KindBlock, Final: r.IntN(8) == 0, Block: chain.Block{Ref: ref}}
+	}
+}
+
 func TestIsolation(t *testing.T) {
 	five := refs(blk(1, 0), blk(2, 0), blk(3, 0), blk(4, 0), blk(5, 0))
 	s := build(t, 0, blocks(1, 5)...)
@@ -563,6 +623,7 @@ func TestCheckBatch(t *testing.T) {
 			revert(blk(0, 0)), finalBlk(blk(2, 2)), block(blk(3, 2)), block(blk(4, 2)), revert(blk(1, 0)),
 		}, 4, "revert to " + blk(1, 0).String() + ": target is neither the finalized block nor in the window"},
 		{"empty batch", stateA(), nil, -1, ""},
+		{"one-ref revert", stateA(), []Entry{revert(blk(4, 0)), block(fork(5, 1, 0))}, -1, ""},
 		{"19 entries", stateA(), longBatch, -1, ""},
 		{"19 entries, then a failure", stateA(), append(slices.Clone(longBatch), block(blk(30, 0))), 19, "block 30: non-final block is not the child of tip " + fork(11, 2, 1).String()},
 	}
@@ -587,6 +648,17 @@ func TestCheckBatch(t *testing.T) {
 		})
 	}
 
+	// A full backing array grows once, for good: later calls neither copy nor allocate.
+	full := NewState(0)
+	n := uint64(1)
+	for ; len(full.win) < 1000 || len(full.win) < cap(full.win); n++ {
+		full.Apply(block(blk(n, 0)))
+	}
+	one := []Entry{block(blk(n, 0))}
+	if a := testing.AllocsPerRun(100, func() { _, _ = full.CheckBatch(one) }); a != 0 {
+		t.Errorf("CheckBatch of one block on a full backing array: %v allocs, want 0", a)
+	}
+
 	// The cost does not grow with the window: no clone, no allocation for a block or a finalize.
 	s := build(t, 0, blocks(1, 50_000)...)
 	batch := []Entry{block(blk(50_001, 0)), finalize(blk(10, 0)), block(blk(50_002, 0))}
@@ -601,8 +673,12 @@ func TestStateSparseBackfillPrefix(t *testing.T) {
 	for k := range len(batch) + 1 {
 		checked := build(t, 0, append([]Entry{finalize(blk(1, 0))}, batch[:k]...)...)
 		replayed := applyOnly(append([]Entry{finalize(blk(1, 0))}, batch[:k]...)...)
-		for name, s := range map[string]State{"checked": checked, "applied": replayed} {
-			t.Run(name+"/"+strconv.Itoa(k), func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			s    State
+		}{{"checked", checked}, {"applied", replayed}} {
+			s := tt.s
+			t.Run(tt.name+"/"+strconv.Itoa(k), func(t *testing.T) {
 				wantState(t, s, tips[k], tips[k], nil)
 				wantInvariants(t, s)
 				if i, err := s.CheckBatch(batch[k:]); i != -1 || err != nil {
