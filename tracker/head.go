@@ -17,8 +17,10 @@ import (
 // nothing for a duplicate, lagging or behind-the-tip head; otherwise an optional
 // Revert followed by one Block per new block in increasing number order.
 //
-// On error Head returns nil entries and the Tracker's state is unchanged. The caller
-// appends the returned entries with one chainlog.Log.Append call.
+// Head returns ErrWindowFull, without calling the Source, when following h would grow
+// the window past the cap. On error Head returns nil entries and the Tracker's state
+// is unchanged. The caller appends the returned entries with one chainlog.Log.Append
+// call.
 func (t *Tracker) Head(ctx context.Context, h chain.Header) ([]chainlog.Entry, error) {
 	r := h.Ref
 	if r.Hash == (common.Hash{}) {
@@ -142,7 +144,8 @@ func (t *Tracker) withLogs(ctx context.Context, anc chain.BlockRef, refs []chain
 }
 
 // checkCap returns ErrWindowFull when adding blocks up to x would grow the window past the cap.
-// The window is contiguous above F, so it would hold x.Number - F.Number blocks.
+// The window is contiguous above F, so it would hold x.Number - F.Number blocks. x must be above
+// F.
 func (t *Tracker) checkCap(x chain.BlockRef) error {
 	if n := x.Number - t.fin.Number; n > uint64(t.cap) { //nolint:gosec // New rejects a negative cap
 		return fmt.Errorf("%w: block %d is %d blocks above finalized block %d (cap %d)",

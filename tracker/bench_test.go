@@ -145,7 +145,7 @@ func BenchmarkFinalizeSteady(b *testing.B) {
 func BenchmarkFillWindow(b *testing.B) {
 	refs, src := benchChain(DefaultWindowCap + 1)
 	ctx := b.Context()
-	var retained int64
+	var retained float64
 	b.ReportAllocs()
 	for b.Loop() {
 		var before, after runtime.MemStats
@@ -163,8 +163,8 @@ func BenchmarkFillWindow(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 		runtime.KeepAlive(tr)
-		retained = int64(after.HeapAlloc) - int64(before.HeapAlloc) //nolint:gosec // heap sizes fit int64
+		retained = float64(after.HeapAlloc) - float64(before.HeapAlloc)
 		b.StartTimer()
 	}
-	b.ReportMetric(float64(retained), "retained-B")
+	b.ReportMetric(retained, "retained-B")
 }
