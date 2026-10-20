@@ -310,7 +310,7 @@ func tornTail(f *os.File, sc segScan) (bool, error) {
 	for p < sc.size {
 		n, err := f.ReadAt(buf[:min(int64(len(buf)), sc.size-p)], p)
 		if err != nil {
-			return false, fmt.Errorf("wal: read %s: %w", f.Name(), err)
+			return false, ioErr("read", f.Name(), err)
 		}
 		for _, b := range buf[:n] {
 			if b != 0 {
@@ -325,11 +325,11 @@ func tornTail(f *os.File, sc segScan) (bool, error) {
 // cutTail truncates the last segment f to the end of its last whole record.
 func (l *Log) cutTail(f *os.File, name string, sc segScan) error {
 	if err := f.Truncate(sc.bad.pos); err != nil {
-		return fmt.Errorf("wal: truncate %s: %w", f.Name(), err)
+		return ioErr("truncate", f.Name(), err)
 	}
 	if l.fsync != nil {
 		if err := l.fsync(f); err != nil {
-			return fmt.Errorf("wal: sync %s: %w", f.Name(), err)
+			return ioErr("sync", f.Name(), err)
 		}
 	}
 	l.logger.Warn("wal torn tail cut",

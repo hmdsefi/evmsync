@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,6 +43,15 @@ func encoded(es []chainlog.Entry) []byte {
 	var b []byte
 	for i, e := range es {
 		e.Offset = chainlog.Offset(i + 1) //nolint:gosec // i < len(es)
+		b = chainlog.Encode(b, e)
+	}
+	return b
+}
+
+// asRead returns the records of es with their own offsets, concatenated: what Read returned.
+func asRead(es []chainlog.Entry) []byte {
+	var b []byte
+	for _, e := range es {
 		b = chainlog.Encode(b, e)
 	}
 	return b
@@ -84,7 +94,7 @@ func wantEntries(t *testing.T, l *Log, es []chainlog.Entry, n int) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !bytes.Equal(encoded(got), encoded(es[:n])) {
+	if !bytes.Equal(asRead(got), encoded(es[:n])) {
 		t.Errorf("entries 1..%d differ from the originals", n)
 	}
 }
@@ -155,6 +165,11 @@ func TestTornVersusCorrupt(t *testing.T) {
 	wrongOffset.Offset = 99
 	reencoded := chainlog.Encode(nil, wrongOffset)
 	f1, _ := parseSegmentName(names[1])
+	sealedEnds := recordEnds(es[:f1-1], 1)
+	sealedLast := int64(0) // start of the last record of the first segment
+	if len(sealedEnds) > 1 {
+		sealedLast = sealedEnds[len(sealedEnds)-2]
+	}
 
 	tests := []struct {
 		name    string
@@ -174,6 +189,16 @@ func TestTornVersusCorrupt(t *testing.T) {
 		{"flipped body byte in the second-to-last record", func(dir string) {
 			rewrite(t, dir, last, func(b []byte) []byte { b[prevStart+20] ^= 1; return b })
 		}, 0, "segment " + last + " position " + strconv.FormatInt(prevStart, 10) + ": "},
+		{"a non-zero first byte in trailing bytes", func(dir string) {
+			rewrite(t, dir, last, func(b []byte) []byte {
+				tail := make([]byte, 4096)
+				tail[0] = 1
+				return append(b, tail...)
+			})
+		}, 0, "segment " + last + " position " + strconv.FormatInt(ends[len(ends)-1], 10) + ": "},
+		{"flipped body byte in the last record of a sealed segment", func(dir string) {
+			rewrite(t, dir, names[0], func(b []byte) []byte { b[sealedLast+20] ^= 1; return b })
+		}, 0, "segment " + names[0] + " position " + strconv.FormatInt(sealedLast, 10) + ": "},
 		{"flipped byte in the first segment", func(dir string) {
 			rewrite(t, dir, names[0], func(b []byte) []byte { b[20] ^= 1; return b })
 		}, 0, "segment " + names[0] + " position 0: "},
@@ -218,5 +243,23 @@ func TestTornVersusCorrupt(t *testing.T) {
 				t.Errorf("last segment holds %d bytes after Open, want %d", got, want)
 			}
 		})
+	}
+}
+
+// TestRecoverSync cuts a torn tail with SyncAlways: Open fsyncs the cut segment.
+func TestRecoverSync(t *testing.T) {
+	dir, _ := thirtyBlocks(t)
+	names := segmentNames(t, dir)
+	last := names[len(names)-1]
+	rewrite(t, dir, last, func(b []byte) []byte { return append(b, make([]byte, 100)...) })
+	rec := &syncRecorder{}
+	opts := recoveryOpts(1024)
+	opts.Sync = SyncAlways
+	l := openLog(t, dir, opts, hooks{sync: rec.sync})
+	if h, _ := l.Head(t.Context()); h != 30 {
+		t.Errorf("Head = %d, want 30", h)
+	}
+	if got := rec.take(); !slices.Contains(got, last) {
+		t.Errorf("fsyncs during Open = %v, want one of the cut segment %s", got, last)
 	}
 }

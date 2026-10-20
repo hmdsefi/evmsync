@@ -125,7 +125,7 @@ func FuzzRecover(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Read: %v", err)
 		}
-		if !bytes.Equal(encoded(got), encoded(es[:head])) {
+		if !bytes.Equal(asRead(got), encoded(es[:head])) {
 			t.Fatal("entries 1..Head differ from the originals")
 		}
 	})
