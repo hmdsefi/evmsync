@@ -11,8 +11,9 @@ import (
 
 // hooks let tests inject failures and observe the WAL's work. Open uses the zero hooks.
 type hooks struct {
-	write  func(f *os.File, p []byte) (int, error) // nil means f.Write
-	replay func(off chainlog.Offset)               // each entry Open applies after the checkpoint
+	write   func(f *os.File, p []byte) (int, error) // nil means f.Write
+	replay  func(off chainlog.Offset)               // each entry Open applies after the checkpoint
+	removed func(name string) bool                  // after each segment deletion; false stops compaction there
 }
 
 func (h *hooks) writeTo(f *os.File, p []byte) (int, error) {

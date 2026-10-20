@@ -383,7 +383,9 @@ func (l *Log) State(ctx context.Context) (chainlog.State, error) {
 }
 
 // Truncate drops whole segments whose entries are all below min(before, L+1), where L is the
-// offset of the newest Finalize entry (0 if none). It keeps the active segment.
+// offset of the newest Finalize entry (0 if none), and deletes their files. It keeps the active
+// segment. A Read of a dropped range returns the entries or an error wrapping
+// chainlog.ErrTruncated.
 func (l *Log) Truncate(ctx context.Context, before chainlog.Offset) error {
 	l.appendMu.Lock()
 	defer l.appendMu.Unlock()
@@ -398,7 +400,7 @@ func (l *Log) Truncate(ctx context.Context, before chainlog.Offset) error {
 	if err != nil || b <= oldest {
 		return err
 	}
-	return nil
+	return l.compact(b)
 }
 
 // Close closes every file, which releases the directory's lock, and wakes every Wait with
