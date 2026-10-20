@@ -124,6 +124,25 @@ func (m *Memory) Append(ctx context.Context, entries ...Entry) (Offset, error) {
 // from is Head+1, an error wrapping ErrTruncated when from is below Oldest, and an error wrapping
 // ErrAhead when from is above Head+1. A from of 0 reads from 1. It panics if max < 1.
 func (m *Memory) Read(ctx context.Context, from Offset, max int) ([]Entry, error) {
+	recs, err := m.records(ctx, from, max)
+	if len(recs) == 0 {
+		return nil, err
+	}
+	// Records never change once appended, so they are decoded without the lock.
+	es := make([]Entry, len(recs))
+	for i, rec := range recs {
+		e, _, err := Decode(rec)
+		if err != nil {
+			// Unreachable: every record was encoded by Append.
+			return nil, fmt.Errorf("chainlog: read record %d of %d: %w", i+1, len(recs), err)
+		}
+		es[i] = e
+	}
+	return es, nil
+}
+
+// records returns the records Read decodes. It copies the slots, since Truncate clears them.
+func (m *Memory) records(ctx context.Context, from Offset, max int) ([][]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.check(ctx); err != nil {
@@ -144,17 +163,7 @@ func (m *Memory) Read(ctx context.Context, from Offset, max int) ([]Entry, error
 		return nil, fmt.Errorf("%w: read from %d, head is %d", ErrAhead, from, m.head)
 	}
 	n := min(uint64(max), uint64(m.head-from)+1)
-	recs := m.recs[from-m.oldest:][:n]
-	es := make([]Entry, len(recs))
-	for i, rec := range recs {
-		e, _, err := Decode(rec)
-		if err != nil {
-			// Unreachable: every record was encoded by Append.
-			return nil, fmt.Errorf("chainlog: read offset %d: %w", from+Offset(i), err) //nolint:gosec // i < n
-		}
-		es[i] = e
-	}
-	return es, nil
+	return slices.Clone(m.recs[from-m.oldest:][:n]), nil
 }
 
 // Wait returns nil once Head > after, ctx.Err() if ctx ends first, ErrClosed if the log closes
@@ -213,8 +222,8 @@ func (m *Memory) State(ctx context.Context) (State, error) {
 }
 
 // Truncate drops the retained entries with offsets below min(before, L+1), where L is the offset
-// of the newest Finalize entry (0 if none), and releases their memory. Oldest is then that bound
-// when it was above Oldest.
+// of the newest Finalize entry (0 if none), and releases their memory. If that bound is above
+// Oldest, Oldest becomes the bound.
 func (m *Memory) Truncate(ctx context.Context, before Offset) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
