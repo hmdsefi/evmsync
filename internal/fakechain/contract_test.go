@@ -208,27 +208,33 @@ func checkLogValues(t *testing.T, c *Chain, logs []chain.Log) {
 	}
 }
 
+// checkCancelled calls every Source method with a cancelled context: each returns
+// context.Canceled unchanged, which wraps none of the chain sentinels, and records no call. The
+// arguments would otherwise fail (unknown hash, number above the head, bad range) or succeed (h).
 func checkCancelled(t *testing.T, src *Source, h common.Hash) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	errs := []error{}
-	_, err := src.Latest(ctx)
-	errs = append(errs, err)
-	_, err = src.Finalized(ctx)
-	errs = append(errs, err)
-	_, err = src.HeaderByNumber(ctx, 99)
-	errs = append(errs, err)
-	_, err = src.HeaderByHash(ctx, h)
-	errs = append(errs, err)
-	_, err = src.Logs(ctx, common.Hash{}, chain.Filter{})
-	errs = append(errs, err)
-	_, err = src.LogsInRange(ctx, 5, 4, chain.Filter{})
-	errs = append(errs, err)
-	for i, err := range errs {
-		if !errors.Is(err, context.Canceled) || errors.Is(err, chain.ErrNotFound) ||
+	before := len(src.Calls())
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{"Latest", func() error { _, err := src.Latest(ctx); return err }},
+		{"Finalized", func() error { _, err := src.Finalized(ctx); return err }},
+		{"HeaderByNumber", func() error { _, err := src.HeaderByNumber(ctx, 1<<40); return err }},
+		{"HeaderByHash", func() error { _, err := src.HeaderByHash(ctx, h); return err }},
+		{"Logs", func() error { _, err := src.Logs(ctx, common.Hash{}, chain.Filter{}); return err }},
+		{"LogsInRange", func() error { _, err := src.LogsInRange(ctx, 5, 4, chain.Filter{}); return err }},
+	}
+	for _, tt := range calls {
+		err := tt.call()
+		if err != context.Canceled || errors.Is(err, chain.ErrNotFound) || //nolint:errorlint // returned unchanged
 			errors.Is(err, chain.ErrUnsupported) || errors.Is(err, chain.ErrInvalidRange) {
-			t.Errorf("call %d with a cancelled context: error %v", i, err)
+			t.Errorf("%s with a cancelled context: error %v, want context.Canceled", tt.name, err)
 		}
+	}
+	if n := len(src.Calls()) - before; n != 0 {
+		t.Errorf("cancelled calls recorded %d calls", n)
 	}
 }

@@ -76,8 +76,9 @@ func TestFixedHashes(t *testing.T) {
 	if id := New(2, Params{}).Meta(DefaultFilter).ID; id == wantID {
 		t.Error("Meta.ID does not depend on the seed")
 	}
-	if got := New(1, Params{ChainID: 5}).Meta(chain.Filter{}).ChainID; got != 5 {
-		t.Errorf("Meta.ChainID = %d, want 5", got)
+	if m := New(1, Params{ChainID: 5}).Meta(chain.Filter{}); m.ChainID != 5 || m.Filter.Addresses != nil ||
+		m.Filter.Topics != nil {
+		t.Errorf("Meta(Filter{}) = %+v, want ChainID 5 and the empty filter", m)
 	}
 }
 
@@ -133,7 +134,7 @@ func TestParams(t *testing.T) {
 	}
 }
 
-// TestFreshLogs derives block 1's logs from the logs stream exactly as the generator must draw
+// TestFreshLogs derives the logs of blocks 1 to 3 from the logs stream exactly as the generator must draw
 // them, and compares.
 func TestFreshLogs(t *testing.T) {
 	counts := []int{0, 0, 0, 1, 1, 1, 2, 2, 3, 4}
@@ -376,6 +377,7 @@ func TestExplicitAPI(t *testing.T) {
 	wantPanic(t, "evmsync: fakechain: negative block count", func() { c.Mine(-1) })
 	wantPanic(t, "evmsync: fakechain: finalized 7 outside [0, 6]", func() { c.SetFinalized(7) })
 	c.SetFinalized(2)
+	c.SetFinalized(2) // the current number is allowed
 	if c.Finalized().Ref != refs[1] {
 		t.Errorf("Finalized() = %v, want block 2", c.Finalized().Ref)
 	}
@@ -493,8 +495,14 @@ func TestReorgMovesLogs(t *testing.T) {
 		for n := uint64(4); n <= 5; n++ {
 			h, _ := c.Canonical(n)
 			b, _ := c.Block(h.Ref.Hash, chain.Filter{})
+			if h.Bloom != chain.BloomOf(b.Logs) {
+				t.Fatalf("seed %d block %d: bloom is not the bloom of its fresh and moved logs", seed, n)
+			}
 			fresh, lastPool := true, -1
 			for i, l := range b.Logs {
+				if l.BlockNumber != n || l.BlockHash != h.Ref.Hash {
+					t.Fatalf("seed %d block %d: log %d names block %d %s", seed, n, i, l.BlockNumber, l.BlockHash.Hex())
+				}
 				if l.Index != uint32(i) || l.TxIndex != uint32(i) {
 					t.Fatalf("seed %d block %d: log %d has Index %d TxIndex %d", seed, n, i, l.Index, l.TxIndex)
 				}

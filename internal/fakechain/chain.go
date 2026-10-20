@@ -130,10 +130,9 @@ func (e Event) String() string {
 	return fmt.Sprintf("mine %d -> head %d 0x%x fin %d", e.Added, e.Head.Number, e.Head.Hash[:4], e.Finalized)
 }
 
-// Step performs one seeded event and returns it: a reorg that never replaces the finalized block
-// (with probability ForkPPM while the head is above it), else mining 1 to MaxMine blocks; then,
-// with probability FinalityPPM, finality moves to a lag of MinLag to MaxLag blocks below the head
-// when that is above the current finalized number.
+// Step performs one seeded event and returns it. The event is a reorg above the finalized block
+// with probability ForkPPM, else mining 1 to MaxMine blocks. Then, with probability FinalityPPM,
+// finality moves up to a lag of MinLag to MaxLag blocks below the head.
 func (c *Chain) Step() Event {
 	r := c.chainRand
 	ev := Event{Kind: EventMine}

@@ -4,7 +4,6 @@
 package fakechain
 
 import (
-	"context"
 	"errors"
 	"slices"
 	"sync"
@@ -96,9 +95,12 @@ func TestHonestSource(t *testing.T) {
 
 	_, err = src.LogsInRange(ctx, 5, 4, chain.Filter{})
 	wantErr(t, err, chain.ErrInvalidRange, "fakechain: logs in range: from 5 > to 4: chain: invalid block range")
+	_, err = src.LogsInRange(ctx, 25, 21, chain.Filter{})
+	wantErr(t, err, chain.ErrInvalidRange, "fakechain: logs in range: from 25 > to 21: chain: invalid block range")
 	_, err = src.LogsInRange(ctx, 1, 21, chain.Filter{})
 	wantErr(t, err, chain.ErrNotFound, "fakechain: block 21: chain: not found")
-	want = append(want, Call{Method: "LogsInRange", Number: 5, To: 4}, Call{Method: "LogsInRange", Number: 1, To: 21})
+	want = append(want, Call{Method: "LogsInRange", Number: 5, To: 4}, Call{Method: "LogsInRange", Number: 25, To: 21},
+		Call{Method: "LogsInRange", Number: 1, To: 21})
 
 	var concat []chain.Log
 	for _, b := range c.CanonicalBlocks(DefaultFilter) {
@@ -132,27 +134,7 @@ func TestHonestSource(t *testing.T) {
 	if n := len(src.Calls()); n != 0 {
 		t.Errorf("after ResetCalls, %d calls", n)
 	}
-	cctx, cancel := context.WithCancel(ctx)
-	cancel()
-	cancelled := []struct {
-		name string
-		call func() error
-	}{
-		{"Latest", func() error { _, err := src.Latest(cctx); return err }},
-		{"Finalized", func() error { _, err := src.Finalized(cctx); return err }},
-		{"HeaderByNumber", func() error { _, err := src.HeaderByNumber(cctx, 1); return err }},
-		{"HeaderByHash", func() error { _, err := src.HeaderByHash(cctx, hashes[1]); return err }},
-		{"Logs", func() error { _, err := src.Logs(cctx, hashes[1], chain.Filter{}); return err }},
-		{"LogsInRange", func() error { _, err := src.LogsInRange(cctx, 1, 2, chain.Filter{}); return err }},
-	}
-	for _, tt := range cancelled {
-		if err := tt.call(); err != context.Canceled { //nolint:errorlint // ctx.Err() is returned unchanged
-			t.Errorf("%s with a cancelled context = %v, want context.Canceled", tt.name, err)
-		}
-	}
-	if n := len(src.Calls()); n != 0 {
-		t.Errorf("cancelled calls recorded %d calls", n)
-	}
+	checkCancelled(t, src, hashes[1])
 
 	// Results belong to the caller.
 	first, _ := src.LogsInRange(ctx, 1, 20, DefaultFilter)
@@ -275,6 +257,9 @@ func TestFaults(t *testing.T) {
 		src := NewSource(c, 6, Faults{FinalizedUnsupported: true})
 		_, err := src.Finalized(ctx)
 		wantErr(t, err, chain.ErrUnsupported, "fakechain: finalized: chain: unsupported")
+		if calls := src.Calls(); !slices.Equal(calls, []Call{{Method: "Finalized"}}) {
+			t.Errorf("Calls() = %v, want the one Finalized call", calls)
+		}
 		src.SetFaults(Faults{})
 		if h, err := src.Finalized(ctx); err != nil || h.Ref.Number != 3 {
 			t.Errorf("Finalized() = %v, %v, want block 3", h.Ref, err)
@@ -410,7 +395,8 @@ func TestConcurrency(t *testing.T) {
 	ctx := t.Context()
 	c := New(10, Params{})
 	c.Mine(10)
-	src := NewSource(c, 10, Faults{StaleHeadPPM: 100_000, StaleOrphanPPM: 100_000, InterleavePPM: 10_000})
+	faults := Faults{StaleHeadPPM: 100_000, StaleOrphanPPM: 100_000, InterleavePPM: 10_000}
+	src := NewSource(c, 10, faults)
 	g := c.Genesis().Ref.Hash
 	var wg sync.WaitGroup
 	for w := range 8 {
@@ -436,6 +422,12 @@ func TestConcurrency(t *testing.T) {
 	wg.Go(func() {
 		for range 200 {
 			src.Do(func(c *Chain) { c.Mine(1) })
+		}
+	})
+	wg.Go(func() {
+		for range 200 {
+			_ = src.Calls()
+			src.SetFaults(faults)
 		}
 	})
 	wg.Wait()

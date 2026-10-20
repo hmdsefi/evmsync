@@ -34,7 +34,8 @@ type Call struct {
 }
 
 // Source implements chain.Source over a Chain, with the provider faults of Faults. It is safe for
-// concurrent use: every method holds one mutex, which also guards the Chain.
+// concurrent use: every method holds one mutex, which also guards the Chain. A method called with
+// a context that is already done returns ctx.Err() unchanged and records nothing.
 type Source struct {
 	mu sync.Mutex
 	// mu guards every field below and the chain c.
@@ -66,11 +67,11 @@ func NewSource(c *Chain, seed uint64, f Faults) *Source {
 // orphaned, as long as that reorg's fork point is not below the finalized number; with
 // StaleHeadPPM, a canonical block 1 to StaleDepth below the head.
 func (s *Source) Latest(ctx context.Context) (chain.Header, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return chain.Header{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls = append(s.calls, Call{Method: "Latest"})
 	depth := s.faults.StaleDepth
 	if depth == 0 {
@@ -94,11 +95,11 @@ func (s *Source) Latest(ctx context.Context) (chain.Header, error) {
 // Finalized returns the canonical header at the chain's finalized number, or an error wrapping
 // chain.ErrUnsupported with FinalizedUnsupported.
 func (s *Source) Finalized(ctx context.Context) (chain.Header, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return chain.Header{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls = append(s.calls, Call{Method: "Finalized"})
 	if s.faults.FinalizedUnsupported {
 		return chain.Header{}, fmt.Errorf("fakechain: finalized: %w", chain.ErrUnsupported)
@@ -109,11 +110,11 @@ func (s *Source) Finalized(ctx context.Context) (chain.Header, error) {
 // HeaderByNumber returns the canonical header at n, or an error wrapping chain.ErrNotFound when n
 // is above the head.
 func (s *Source) HeaderByNumber(ctx context.Context, n uint64) (chain.Header, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return chain.Header{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lookup(Call{Method: "HeaderByNumber", Number: n})
 	h, ok := s.c.Canonical(n)
 	if !ok {
@@ -125,11 +126,11 @@ func (s *Source) HeaderByNumber(ctx context.Context, n uint64) (chain.Header, er
 // HeaderByHash returns any tree block's header, or an error wrapping chain.ErrNotFound for an
 // unknown hash or, with DropOrphans, an orphan.
 func (s *Source) HeaderByHash(ctx context.Context, h common.Hash) (chain.Header, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return chain.Header{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lookup(Call{Method: "HeaderByHash", Hash: h})
 	nd, err := s.node(h)
 	if err != nil {
@@ -142,32 +143,31 @@ func (s *Source) HeaderByHash(ctx context.Context, h common.Hash) (chain.Header,
 // an error wrapping chain.ErrNotFound for an unknown hash or, with DropOrphans, an orphan. With
 // DroppedLogsPPM it may answer nil for a block that has matching logs.
 func (s *Source) Logs(ctx context.Context, block common.Hash, f chain.Filter) ([]chain.Log, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lookup(Call{Method: "Logs", Hash: block})
 	nd, err := s.node(block)
 	if err != nil {
 		return nil, err
 	}
-	logs := matching(nd.logs, f)
 	if s.logsRand.Chance(s.faults.DroppedLogsPPM) {
 		return nil, nil
 	}
-	return logs, nil
+	return matching(nd.logs, f), nil
 }
 
 // LogsInRange returns the logs of canonical blocks from to to (inclusive) that pass f, by block
 // then Index, or nil when none passes. It returns an error wrapping chain.ErrInvalidRange when
 // from > to, and chain.ErrNotFound when to is above the head.
 func (s *Source) LogsInRange(ctx context.Context, from, to uint64, f chain.Filter) ([]chain.Log, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.lookup(Call{Method: "LogsInRange", Number: from, To: to})
 	if from > to {
 		return nil, fmt.Errorf("fakechain: logs in range: from %d > to %d: %w", from, to, chain.ErrInvalidRange)
@@ -178,13 +178,13 @@ func (s *Source) LogsInRange(ctx context.Context, from, to uint64, f chain.Filte
 	}
 	var logs []chain.Log
 	for n := from; n <= to; n++ {
-		logs = append(logs, matching(c.nodes[c.canonical[n]].logs, f)...)
+		logs = appendMatching(logs, c.nodes[c.canonical[n]].logs, f)
 	}
 	return logs, nil
 }
 
 // Do runs fn with the Source's mutex held, so tests can change the chain while the Source is in
-// use.
+// use. fn must not call the Source's methods: the mutex is not reentrant.
 func (s *Source) Do(fn func(c *Chain)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

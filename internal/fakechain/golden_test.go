@@ -47,7 +47,8 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// chainDigest hashes the event lines, then every canonical block's ref and all of its logs.
+// chainDigest hashes the event lines, then every canonical block's ref and bloom and all of its
+// logs.
 func chainDigest(c *Chain, evs []Event) string {
 	h := sha3.NewLegacyKeccak256()
 	for _, e := range evs {
@@ -66,6 +67,8 @@ func chainDigest(c *Chain, evs []Event) string {
 		h.Write(b.Ref.Hash[:])
 		h.Write(b.Ref.Parent[:])
 		put(b.Ref.Time)
+		hd, _ := c.Canonical(b.Ref.Number)
+		h.Write(hd.Bloom[:])
 		put(uint64(len(b.Logs)))
 		for _, l := range b.Logs {
 			h.Write(l.Address[:])
@@ -75,6 +78,8 @@ func chainDigest(c *Chain, evs []Event) string {
 			}
 			put(uint64(len(l.Data)))
 			h.Write(l.Data)
+			put(l.BlockNumber)
+			h.Write(l.BlockHash[:])
 			h.Write(l.TxHash[:])
 			put(uint64(l.TxIndex))
 			put(uint64(l.Index))

@@ -56,15 +56,19 @@ func addressTopic(a common.Address) common.Hash {
 
 // matching returns copies of the logs that pass f, or nil when none does.
 func matching(logs []chain.Log, f chain.Filter) []chain.Log {
-	var out []chain.Log
+	return appendMatching(nil, logs, f)
+}
+
+// appendMatching appends copies of the logs that pass f to dst and returns the result.
+func appendMatching(dst, logs []chain.Log, f chain.Filter) []chain.Log {
 	for _, l := range logs {
 		if f.Match(l) {
 			l.Topics = slices.Clone(l.Topics)
 			l.Data = bytes.Clone(l.Data)
-			out = append(out, l)
+			dst = append(dst, l)
 		}
 	}
-	return out
+	return dst
 }
 
 func blockHash(n uint64, parent common.Hash, serial uint64) common.Hash {
