@@ -6,6 +6,7 @@ package invariant
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/hmdsefi/evmsync/chain"
 	"github.com/hmdsefi/evmsync/chainlog"
 	"github.com/hmdsefi/evmsync/internal/fakechain"
+	"github.com/hmdsefi/evmsync/tracker"
 )
 
 // memoryConfig is the configuration of TestReorgInvariant.
@@ -403,4 +405,153 @@ func wantPanic(t *testing.T, msg string, fn func()) {
 		}
 	}()
 	fn()
+}
+
+// scenarioFor builds a scenario over chain c without running it, for tests of one stage.
+func scenarioFor(t *testing.T, c *fakechain.Chain, lg *chainlog.Memory, sub Subject) *scenario {
+	return &scenario{
+		t: t, cfg: memoryConfig().withDefaults(), seed: 1, ctx: t.Context(), c: c,
+		src: fakechain.NewSource(c, 1, fakechain.Faults{}), lg: lg, sub: sub, rep: Report{Seed: 1},
+	}
+}
+
+func TestPollTolerance(t *testing.T) {
+	c := fakechain.New(1, fakechain.Params{})
+	s := scenarioFor(t, c, chainlog.NewMemory(c.Meta(Filter), 0), NewMemorySubject())
+	g := c.Genesis().Ref
+	notFound := fmt.Errorf("tracker: logs: %w", chain.ErrNotFound)
+	if err := s.add("poll at step 3", "append at step 3", g, "head", nil, notFound, true); err != nil ||
+		s.rep.Tolerated != 1 {
+		t.Errorf("tolerated not-found: %v, Tolerated %d; want nil, 1", err, s.rep.Tolerated)
+	}
+	other := fmt.Errorf("tracker: %w", tracker.ErrInconsistentSource)
+	err := s.add("poll at step 3", "append at step 3", g, "head", nil, other, true)
+	if want := "poll at step 3: head: tracker: tracker: inconsistent source"; err == nil || err.Error() != want {
+		t.Errorf("inconsistent source: %v, want %q", err, want)
+	}
+	err = s.add("settle", "settle", g, "finalize", nil, notFound, false)
+	if err == nil || !strings.HasPrefix(err.Error(), "settle: finalize: ") || s.rep.Tolerated != 1 {
+		t.Errorf("not-found without tolerance: %v, Tolerated %d; want a settle error, 1", err, s.rep.Tolerated)
+	}
+	bad := []chainlog.Entry{{Kind: chainlog.KindRevert, To: g}}
+	err = s.add("poll at step 4", "append at step 4", g, "head", bad, nil, true)
+	if err == nil || !strings.HasPrefix(err.Error(), "append at step 4: offset 1: +revert 0: ") ||
+		!errors.Is(err, chainlog.ErrMalformed) {
+		t.Errorf("malformed append: %v, want an append error wrapping ErrMalformed", err)
+	}
+}
+
+func TestVerifyTexts(t *testing.T) {
+	ctx := t.Context()
+	twin := fakechain.New(1, fakechain.Params{})
+	long := twin.Mine(4)
+	c := fakechain.New(1, fakechain.Params{})
+	c.Mine(3)
+	g := c.Genesis().Ref
+	logOf := func(refs []chain.BlockRef) *chainlog.Memory {
+		lg := chainlog.NewMemory(c.Meta(Filter), 0)
+		es := []chainlog.Entry{{Kind: chainlog.KindFinalize, To: g}}
+		for _, r := range refs {
+			b, _ := twin.Block(r.Hash, Filter)
+			es = append(es, chainlog.Entry{Kind: chainlog.KindBlock, Block: b})
+		}
+		if _, err := lg.Append(ctx, es...); err != nil {
+			t.Fatal(err)
+		}
+		return lg
+	}
+	tests := []struct {
+		name string
+		refs []chain.BlockRef
+		sub  func(head chainlog.Offset) Subject
+		want string
+	}{
+		{"one block short", long[:2], nil, "structure: live block 2 is none, want " + long[2].String()},
+		{"one block long", long, nil, "structure: live block 3 is " + long[3].String() + ", want none"},
+		{"offset ahead", long[:3], func(head chainlog.Offset) Subject {
+			return claimsOffset{NewMemorySubject(), head + 1}
+		}, "offset: 5, want 4"},
+		{"offset behind", long[:3], func(chainlog.Offset) Subject { return NewMemorySubject() }, "offset: 0, want 4"},
+	}
+	for _, tt := range tests {
+		lg := logOf(tt.refs)
+		head, _ := lg.Head(ctx)
+		sub := NewMemorySubject()
+		if tt.sub != nil {
+			sub = tt.sub(head)
+		}
+		_, err := scenarioFor(t, c, lg, sub).verify(g)
+		if err == nil || err.Error() != tt.want {
+			t.Errorf("%s: %v, want %q", tt.name, err, tt.want)
+		}
+	}
+}
+
+func TestReferenceID(t *testing.T) {
+	var b bytes.Buffer
+	b.WriteString("evmsync/invariant/reference")
+	b.Write([]byte{0, 0, 0, 0, 0, 0, 0x01, 0x02})
+	h := keccakOf(b.Bytes())
+	if got := referenceID(0x0102); !bytes.Equal(got[:], h[:16]) {
+		t.Errorf("referenceID(0x0102) = %x, want %x", got, h[:16])
+	}
+	if referenceID(1) == fakechain.New(1, fakechain.Params{}).Meta(Filter).ID {
+		t.Error("the reference log shares the scenario log's ID")
+	}
+}
+
+// TestScenarioGolden pins what three seeds produce: a change to the harness's draws, polls or
+// fallback depth changes their reports. Seed 2's source has no finalized tag.
+func TestScenarioGolden(t *testing.T) {
+	want := map[uint64]Report{
+		1: {Entries: 766, Blocks: 678, Reverts: 29, MaxRevertDepth: 2, Restarts: 4},
+		2: {Entries: 682, Blocks: 521, Reverts: 53, MaxRevertDepth: 6, Tolerated: 5, Restarts: 2},
+		3: {Entries: 314, Blocks: 235, Reverts: 55, MaxRevertDepth: 5, Restarts: 4},
+	}
+	for seed, w := range want {
+		w.Seed = seed
+		got, err := Check(t, memoryConfig(), seed)
+		if err != nil || got != w {
+			t.Errorf("seed %d: Check = %#v, %v; want %#v", seed, got, err, w)
+		}
+	}
+}
+
+// fatalTB records the first Fatalf and stops the scenario with a panic the test recovers.
+type fatalTB struct {
+	testing.TB
+	msg string
+}
+
+type fatalStop struct{}
+
+func (f *fatalTB) Fatalf(format string, args ...any) {
+	f.msg = fmt.Sprintf(format, args...)
+	panic(fatalStop{})
+}
+
+func TestNilSubjects(t *testing.T) {
+	run := func(cfg Config) (msg string) {
+		f := &fatalTB{TB: t}
+		defer func() {
+			if r := recover(); r != nil {
+				if _, ok := r.(fatalStop); !ok {
+					panic(r)
+				}
+				msg = f.msg
+			}
+		}()
+		_, _ = Check(f, cfg, 1)
+		return ""
+	}
+	cfg := memoryConfig()
+	cfg.New = func(testing.TB) Subject { return nil }
+	if got, want := run(cfg), "invariant: seed 1: Config.New returned nil"; got != want {
+		t.Errorf("New returning nil: Fatalf %q, want %q", got, want)
+	}
+	cfg = memoryConfig()
+	cfg.Reopen = func(testing.TB, Subject) Subject { return nil }
+	if got, want := run(cfg), "invariant: seed 1: Config.Reopen returned nil"; got != want {
+		t.Errorf("Reopen returning nil: Fatalf %q, want %q", got, want)
+	}
 }

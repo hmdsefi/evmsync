@@ -202,6 +202,10 @@ func TestSelectSeeds(t *testing.T) {
 		{"bad seed", map[string]string{envSeed: "-3"}, nil, false, "invariant: bad EVMSYNC_INVARIANT_SEED: -3"},
 		{"bad count", map[string]string{envSeeds: "two"}, nil, false, "invariant: bad EVMSYNC_INVARIANT_SEEDS: two"},
 		{"bad base", map[string]string{envBase: "0x"}, nil, false, "invariant: bad EVMSYNC_INVARIANT_BASE: 0x"},
+		{"last seed", map[string]string{envSeeds: "2", envBase: "18446744073709551614"}, []uint64{1<<64 - 2, 1<<64 - 1},
+			false, ""},
+		{"past the last seed", map[string]string{envSeeds: "3", envBase: "18446744073709551614"}, nil, false,
+			"invariant: bad EVMSYNC_INVARIANT_SEEDS: 3 seeds from 18446744073709551614 pass the largest seed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

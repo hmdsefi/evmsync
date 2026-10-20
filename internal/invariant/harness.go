@@ -167,7 +167,10 @@ func selectSeeds(cfg Config) ([]uint64, bool, error) {
 			return nil, false, err
 		}
 	}
-	seeds := make([]uint64, 0, count)
+	if count > 0 && base+(count-1) < base {
+		return nil, false, fmt.Errorf("invariant: bad %s: %d seeds from %d pass the largest seed", envSeeds, count, base)
+	}
+	seeds := make([]uint64, 0, min(count, 1<<20))
 	for i := range count {
 		seeds = append(seeds, base+i)
 	}
@@ -260,7 +263,7 @@ func check(t testing.TB, cfg Config, seed uint64) (outcome, error) {
 	}
 	g := c.Genesis().Ref
 	es, err := s.tr.Finalize(s.ctx, g)
-	if err := s.add("poll at step 0", "append at step 0", g, "finalize", es, err, false); err != nil {
+	if err := s.add("setup", "setup", g, "finalize", es, err, false); err != nil {
 		return s.outcome(), err
 	}
 	s.sub = s.newSubject()
@@ -488,10 +491,7 @@ func (c *cancelAt) Apply(ctx context.Context, e chainlog.Entry) error {
 // blocks alone: the backfill path, sparse final blocks, against the realtime path of the scenario.
 func (s *scenario) reference(g chain.BlockRef, canon []chain.Block) ([]byte, error) {
 	meta := s.c.Meta(Filter)
-	h := sha3.NewLegacyKeccak256()
-	h.Write([]byte("evmsync/invariant/reference"))
-	h.Write(binary.BigEndian.AppendUint64(nil, s.seed))
-	copy(meta.ID[:], h.Sum(nil))
+	meta.ID = referenceID(s.seed)
 
 	head := g
 	if len(canon) > 0 {
@@ -506,6 +506,17 @@ func (s *scenario) reference(g chain.BlockRef, canon []chain.Block) ([]byte, err
 		return nil, err
 	}
 	return sub.Digest(s.ctx)
+}
+
+// referenceID returns the reference log's ID for seed: the first 16 bytes of
+// Keccak-256("evmsync/invariant/reference" || seed as 8 big-endian bytes).
+func referenceID(seed uint64) chainlog.ID {
+	h := sha3.NewLegacyKeccak256()
+	h.Write([]byte("evmsync/invariant/reference"))
+	h.Write(binary.BigEndian.AppendUint64(nil, seed))
+	var id chainlog.ID
+	copy(id[:], h.Sum(nil))
+	return id
 }
 
 // referenceEntries returns Finalize g; then the blocks with at least one log, as final blocks, in
