@@ -61,7 +61,8 @@ func BenchmarkStateBlock(b *testing.B) {
 }
 
 // BenchmarkMemoryAppend appends one block of 10 logs (3 topics, 64 bytes of data) and a Finalize
-// of the window's first ref per iteration, so the window keeps 50,000 refs.
+// of the window's first ref per iteration, so the window keeps 50,000 refs. ns/op covers both
+// appends, so it can only overstate the cost of the block.
 func BenchmarkMemoryAppend(b *testing.B) {
 	const window = 50_000
 	ctx := b.Context()

@@ -1,0 +1,4 @@
+directive.go:12:2: AP0: //evmsync:maporder needs a reason
+directive.go:13:2: AP4: range over map map[int]int has random order; range over sorted keys or annotate //evmsync:maporder <reason>
+directive.go:16:2: AP0: //evmsync:maporder suppresses no finding
+directive.go:21:2: AP4: range over map map[int]int has random order; range over sorted keys or annotate //evmsync:maporder <reason>

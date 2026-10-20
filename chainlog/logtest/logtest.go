@@ -31,7 +31,8 @@ func Meta() chainlog.Meta {
 
 // Run runs the conformance suite. open must return a new, empty log created with Meta() and
 // WindowCap; Run calls it once per subtest (twice in the subtests that need a second empty log)
-// and closes each log when the subtest ends.
+// and closes each log when the subtest ends. Wait must select on ctx.Done() while it blocks: Run
+// detects a blocked Wait that way.
 func Run(t *testing.T, open func(t *testing.T) chainlog.Log) {
 	t.Helper()
 	for _, c := range cases() {
