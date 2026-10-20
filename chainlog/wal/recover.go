@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -231,7 +232,18 @@ func (l *Log) openSegments(names []string) error {
 			return err
 		}
 		if sc.bad != nil {
-			return fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, name, sc.bad.pos, sc.bad.err)
+			torn := false
+			if active {
+				if torn, err = tornTail(f, sc); err != nil {
+					return err
+				}
+			}
+			if !torn {
+				return fmt.Errorf("%w: segment %s position %d: %w", ErrCorrupt, name, sc.bad.pos, sc.bad.err)
+			}
+			if err := l.cutTail(f, name, sc); err != nil {
+				return err
+			}
 		}
 		if !active && sc.last < sc.first {
 			return fmt.Errorf("%w: segment %s is empty", ErrCorrupt, name)
@@ -276,4 +288,47 @@ func (l *Log) readFile(name string) ([]byte, error) {
 		return nil, fmt.Errorf("wal: read %s: %w", path, err)
 	}
 	return b, nil
+}
+
+// tornTail reports whether the bad record that ends sc's scan of the last segment f is the tail
+// of an interrupted write rather than corruption: fewer than 8 bytes remain, the record's
+// declared end is at or past the end of the file, or every byte from it on is zero. A bad record
+// followed by more data is corruption, so the WAL never drops the records after it.
+func tornTail(f *os.File, sc segScan) (bool, error) {
+	p := sc.bad.pos
+	if sc.bad.declaredEnd < 0 || sc.bad.declaredEnd >= sc.size {
+		return true, nil
+	}
+	buf := make([]byte, readBuffer)
+	for p < sc.size {
+		n, err := f.ReadAt(buf[:min(int64(len(buf)), sc.size-p)], p)
+		if err != nil {
+			return false, fmt.Errorf("wal: read %s: %w", f.Name(), err)
+		}
+		for _, b := range buf[:n] {
+			if b != 0 {
+				return false, nil
+			}
+		}
+		p += int64(n)
+	}
+	return true, nil
+}
+
+// cutTail truncates the last segment f to the end of its last whole record.
+func (l *Log) cutTail(f *os.File, name string, sc segScan) error {
+	if err := f.Truncate(sc.bad.pos); err != nil {
+		return fmt.Errorf("wal: truncate %s: %w", f.Name(), err)
+	}
+	if l.sync {
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("wal: sync %s: %w", f.Name(), err)
+		}
+	}
+	l.logger.Warn("wal torn tail cut",
+		slog.String("segment", name),
+		slog.Int64("position", sc.bad.pos),
+		slog.Int64("bytes", sc.size-sc.bad.pos),
+	)
+	return nil
 }
