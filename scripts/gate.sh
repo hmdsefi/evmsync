@@ -19,16 +19,23 @@ if [ $# -ne 0 ]; then
 	exit 2
 fi
 
-unset GOROOT
+unset GOROOT CDPATH
 export GOWORK=off
 
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel) || exit 2
 GATE_TCS=${GATE_TCS:-local}
+if [ -z "${GATE_TCS// /}" ]; then
+	GATE_TCS=local
+fi
 GATE_LOGS=${GATE_LOGS:-$root/tmp/gate}
 GATE_LINT=${GATE_LINT:-golangci-lint}
 
 mkdir -p "$GATE_LOGS" || exit 2
 GATE_LOGS=$(cd "$GATE_LOGS" && pwd) || exit 2
+# A relative GATE_LINT path must keep working after the cd below and in nested modules.
+case $GATE_LINT in
+*/*) GATE_LINT=$(cd "$(dirname "$GATE_LINT")" && pwd)/$(basename "$GATE_LINT") || exit 2 ;;
+esac
 rm -f "$GATE_LOGS"/*.log
 cd "$root" || exit 2
 
@@ -65,8 +72,8 @@ run() {
 	"$@"
 }
 
-# check_gofmt lists the tracked and untracked Go files gofmt would change. git ls-files keeps
-# gitignored trees such as .helper/ out of the walk.
+# check_gofmt lists the tracked and untracked Go files gofmt would change, using the gofmt of the
+# toolchain under test. git ls-files keeps gitignored trees such as .helper/ out of the walk.
 check_gofmt() {
 	local files bad
 	files=$(git ls-files --cached --others --exclude-standard '*.go') || return 1
@@ -75,7 +82,7 @@ check_gofmt() {
 	fi
 	# Word splitting on purpose, as in CI.
 	# shellcheck disable=SC2086
-	bad=$(gofmt -l $files) || {
+	bad=$("$(go env GOROOT)/bin/gofmt" -l $files) || {
 		printf '%s\n' "$bad"
 		return 1
 	}
