@@ -52,7 +52,7 @@ jobs:
       - name: fuzz smoke
         run: |
           set -e
-          for t in ; do
+          for t in chainlog:FuzzDecode chainlog:FuzzRoundTrip; do
             pkg=${t%%:*}
             target=${t#*:}
             go test -list "^${target}\$" "./$pkg" | grep -qx "$target" || { echo "fuzz target $target not found in ./$pkg"; exit 1; }
