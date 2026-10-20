@@ -1,0 +1,1 @@
+mapsiter.go:10:22: AP4: maps.Keys yields in random order; wrap it in slices.Sorted or annotate //evmsync:maporder <reason>
