@@ -8,8 +8,8 @@ in behavior, open an issue first, so we can agree on the design before you write
 
 ## Development setup
 
-You need Go 1.26 or newer and golangci-lint v2.14.0. Older golangci-lint releases are built with
-Go 1.25 and refuse to load a `go 1.26.0` module.
+You need Go 1.26 or newer and golangci-lint v2.14.0. golangci-lint v2.7.2 and other releases built
+with Go 1.25 refuse to load a `go 1.26.0` module.
 
 ```shell
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
@@ -23,7 +23,7 @@ scripts/gate.sh
 
 It runs the same checks as CI on your working tree: gofmt, `go mod tidy -diff`, `go vet`, the
 build and tests with `CGO_ENABLED=0`, the tests with the race detector, the nested modules and
-golangci-lint. It prints one `PASS` or `FAIL` line per step and ends with `RESULT GREEN` (exit 0)
+golangci-lint. It prints one `PASS`, `FAIL` or `SKIP` line per step and ends with `RESULT GREEN` (exit 0)
 or `RESULT RED` (exit 1). Three environment variables change what it runs:
 
 | Variable | Default | Meaning |
@@ -36,8 +36,8 @@ CI runs these checks on Linux and macOS with Go 1.26 and 1.27.
 
 ## Repository layout
 
-Each directory of the root module is one package with one job. The version is the release a
-package first ships in.
+Each directory is one package with one job; `pgstore`, `e2e` and `examples` are nested modules
+with their own `go.mod`. The version is the release a package first ships in.
 
 | Package | Holds | Version |
 |---|---|---|
@@ -68,14 +68,15 @@ change that adds it also adds it to this table and to the inventory in `internal
 
 The apply path is the code that turns log entries into state: `chain`, `chainlog`, `tracker`,
 `consumer` and `memstore`. Replaying the same log must always build the same state, so this code
-follows four rules, and `internal/archtest` checks them:
+follows four rules, and `internal/archtest` checks them. The dispatch code of the root `evmsync`
+package and `pgstore` follows the same rules; review checks those by hand.
 
 - **No wall clock.** Read time from the block (`chain.BlockRef.Time`), never from `time.Now`,
   `time.Since`, `time.Until`, `time.Sleep`, timers or tickers.
 - **No global randomness.** No functions of `math/rand` or `math/rand/v2`.
 - **No goroutines.** No `go` statement, except inside `consumer.Run`.
-- **No map order.** Range over sorted keys, never over a map directly. Wrap `maps.All`,
-  `maps.Keys` and `maps.Values` in `slices.Sorted`.
+- **No map order.** Range over sorted keys, never over a map directly. Wrap `maps.Keys` and
+  `maps.Values` in `slices.Sorted`; instead of `maps.All`, range over the sorted keys.
 
 When the order of a map range never reaches state, an entry, an error or a log line, annotate the
 loop with a reason:
@@ -96,11 +97,12 @@ under `testdata/` are the exception.
 
 ```go
 // Copyright 2026 Hamed Yousefi
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: Apache-2.0
 ```
 
 ## Commits
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): a type, the
 package as the scope, and a short subject, for example `feat(chainlog): add the record codec` or
-`fix(tracker): stop at the finalized block`. Changes to root files use the `build` or `ci` type.
+`fix(tracker): stop at the finalized block`. Changes to `go.mod` and the lint config use the
+`build` type, changes to workflows the `ci` type.
