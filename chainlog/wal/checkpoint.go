@@ -23,8 +23,8 @@ type checkpoint struct {
 	state chainlog.State
 }
 
-// encodeCheckpoint returns the checkpoint file for c: the meta file's header, then a body of the
-// magic, version 1, x and l as varints, and the state's binary form.
+// encodeCheckpoint returns the checkpoint file for c: the same 8-byte header as meta, then a body
+// of the magic, version 1, x and l as varints, and the state's binary form.
 func encodeCheckpoint(c checkpoint) []byte {
 	state, _ := c.state.MarshalBinary() // never fails
 	b := make([]byte, fileHeader, fileHeader+len(checkpointMagic)+1+2*binary.MaxVarintLen64+len(state))

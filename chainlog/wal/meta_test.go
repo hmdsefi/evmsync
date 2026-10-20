@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/hmdsefi/evmsync/chain"
@@ -123,7 +125,7 @@ func TestMetaCorrupt(t *testing.T) {
 		{"body cut in the ID", seal(body[:12]), "truncated"},
 		{"body cut in an address", seal(cat(head, uv(1), rep(0xaa, 19))), "truncated"},
 		{"body cut in a topic", seal(cat(head, uv(0), uv(1), uv(1), rep(0x01, 31))), "truncated"},
-		{"chain ID non-minimal", seal(cat(body[:25], []byte{0x80, 0x00})), "truncated"},
+		{"chain ID non-minimal", seal(cat(body[:25], []byte{0x80, 0x00}, body[28:])), "truncated"},
 		{"no positions count", seal(cat(head, uv(0))), "truncated"},
 	}
 	for _, tt := range tests {
@@ -159,7 +161,10 @@ func TestWriteFileAtomic(t *testing.T) {
 		if mode := fi.Mode().Perm(); mode != 0o600 {
 			t.Errorf("sync %v: mode %v, want 0600", sync, mode)
 		}
-		entries, _ := os.ReadDir(dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
 		if len(entries) != 1 {
 			t.Errorf("sync %v: directory holds %v, want only meta", sync, entries)
 		}
@@ -170,10 +175,58 @@ func TestWriteFileAtomic(t *testing.T) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("writeFileAtomic into a missing directory = %v, want one wrapping fs.ErrNotExist", err)
 	}
-	if want := "wal: open " + filepath.Join(missing, "meta.tmp") + ": "; len(err.Error()) <= len(want) || err.Error()[:len(want)] != want {
-		t.Errorf("error = %q, want the prefix %q", err, want)
+	if want := "wal: open " + filepath.Join(missing, "meta.tmp") + ": " + syscall.ENOENT.Error(); err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+
+	// A failed rename leaves no temporary file behind.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "meta", "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	err = writeFileAtomic(dir, "meta", []byte("x"), false)
+	if err == nil || !strings.HasPrefix(err.Error(), "wal: rename "+filepath.Join(dir, "meta")+": ") {
+		t.Errorf("writeFileAtomic onto a directory = %v, want a rename error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "meta.tmp")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("meta.tmp after a failed rename: %v, want it removed", err)
 	}
 	if err := syncDir(missing); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("syncDir of a missing directory = %v, want one wrapping fs.ErrNotExist", err)
+	}
+}
+
+// TestMetaLimits round-trips a meta at every filter limit and checks the body size limit.
+func TestMetaLimits(t *testing.T) {
+	var m chainlog.Meta
+	m.ID[0] = 1
+	for i := range 1000 {
+		var a [20]byte
+		binary.BigEndian.PutUint16(a[:], uint16(i)) //nolint:gosec // i < 1000
+		m.Filter.Addresses = append(m.Filter.Addresses, a)
+	}
+	for range 4 {
+		m.Filter.Topics = append(m.Filter.Topics, nil)
+	}
+	for i := range 1000 {
+		var topic [32]byte
+		binary.BigEndian.PutUint16(topic[:], uint16(i)) //nolint:gosec // i < 1000
+		m.Filter.Topics[3] = append(m.Filter.Topics[3], topic)
+	}
+	m.Filter.Topics[0] = append(m.Filter.Topics[0], [32]byte{1})
+	got, err := decodeMeta(encodeMeta(m))
+	if err != nil {
+		t.Fatalf("decodeMeta of a meta at every limit: %v", err)
+	}
+	if !reflect.DeepEqual(got, m) {
+		t.Error("meta at every limit does not round-trip")
+	}
+
+	body := make([]byte, 100)
+	if b, detail := openFile(seal(body), 100); detail != "" || len(b) != 100 {
+		t.Errorf("openFile of a body at the limit = %d bytes, %q; want 100, \"\"", len(b), detail)
+	}
+	if _, detail := openFile(seal(append(body, 0)), 100); detail != "too large" {
+		t.Errorf("openFile of a body one byte over the limit = %q, want \"too large\"", detail)
 	}
 }
