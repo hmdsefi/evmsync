@@ -102,6 +102,11 @@ func FuzzRecover(f *testing.F) {
 			return
 		}
 		defer l.Close()
+		// The active segment ends at its last whole record, where the next Append writes.
+		active := l.segs[len(l.segs)-1]
+		if fi, err := os.Stat(filepath.Join(dir, active.name)); err != nil || fi.Size() != active.size {
+			t.Fatalf("active segment holds %d bytes on disk, the log counts %d (%v)", fi.Size(), active.size, err)
+		}
 		if wantHead == -2 {
 			t.Fatal("Open succeeded on a damaged record that is not the last one, want ErrCorrupt")
 		}

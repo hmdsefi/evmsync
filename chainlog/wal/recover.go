@@ -327,8 +327,8 @@ func (l *Log) cutTail(f *os.File, name string, sc segScan) error {
 	if err := f.Truncate(sc.bad.pos); err != nil {
 		return fmt.Errorf("wal: truncate %s: %w", f.Name(), err)
 	}
-	if l.sync {
-		if err := f.Sync(); err != nil {
+	if l.fsync != nil {
+		if err := l.fsync(f); err != nil {
 			return fmt.Errorf("wal: sync %s: %w", f.Name(), err)
 		}
 	}
